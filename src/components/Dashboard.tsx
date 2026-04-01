@@ -489,7 +489,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
   /* ── 刪除設備 ──────────────────────────────────────────────────────────
      主帳號刪除：同時刪除所有 share_from = email 的分享 row（連帶清除）
-     分享來的設備刪除：只刪自己那筆，並將主帳號 count + 1（歸還分享次數）*/
+     分享來的設備刪除：只刪自己那筆，並呼叫 RPC 歸還主帳號分享次數      */
   const handleDeleteDevice = async (dev: DeviceCredential) => {
     if (!confirm(`刪除「${displayName(dev)}」？`)) return;
     try {
@@ -508,28 +508,18 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           .delete()
           .eq("id", dev.id);
       } else {
-        // 分享來的設備：只刪自己那筆
+        // 分享來的設備：先歸還次數（刪除前呼叫，確保 RPC 能找到此 row）
+        await supabase.rpc("return_share_count", {
+          p_owner_email: dev.share_from,
+          p_device_name: dev.device_name,
+          p_mqtt_user:   dev.mqtt_user ?? "",
+        });
+        // 再刪自己的 row
         const { error: delErr } = await supabase
           .from("device_credentials")
           .delete()
           .eq("id", dev.id);
         if (delErr) throw delErr;
-
-        // 歸還分享次數：找主帳號 owner row（share_from = dev.share_from）並 count + 1
-        const { data: ownerRow } = await supabase
-          .from("device_credentials")
-          .select("id, count")
-          .eq("user_id", dev.share_from)
-          .eq("device_name", dev.device_name)
-          .eq("mqtt_user", dev.mqtt_user ?? "")
-          .is("share_from", null)
-          .maybeSingle();
-        if (ownerRow) {
-          await supabase
-            .from("device_credentials")
-            .update({ count: parseInt(String(ownerRow.count ?? 0), 10) + 1 })
-            .eq("id", ownerRow.id);
-        }
       }
     } catch (err: any) {
       alert("刪除失敗：" + (err.message || err));
@@ -667,28 +657,19 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     if (!selectedDevice?.share_from) return;
     setLeaveLoading(true);
     try {
-      // 刪自己的 row
+      // 先歸還次數（刪除前呼叫，確保 RPC 能找到此 row）
+      await supabase.rpc("return_share_count", {
+        p_owner_email: selectedDevice.share_from,
+        p_device_name: selectedDevice.device_name,
+        p_mqtt_user:   selectedDevice.mqtt_user ?? "",
+      });
+
+      // 再刪自己的 row
       const { error } = await supabase
         .from("device_credentials")
         .delete()
         .eq("id", selectedDevice.id);
       if (error) throw error;
-
-      // 歸還分享次數：找主帳號 owner row 並 count + 1
-      const { data: ownerRow } = await supabase
-        .from("device_credentials")
-        .select("id, count")
-        .eq("user_id", selectedDevice.share_from)
-        .eq("device_name", selectedDevice.device_name)
-        .eq("mqtt_user", selectedDevice.mqtt_user ?? "")
-        .is("share_from", null)
-        .maybeSingle();
-      if (ownerRow) {
-        await supabase
-          .from("device_credentials")
-          .update({ count: parseInt(String(ownerRow.count ?? 0), 10) + 1 })
-          .eq("id", ownerRow.id);
-      }
 
       const upd = devices.filter((d) => d.id !== selectedDevice.id);
       setDevices(upd);
