@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from "react";
-import ReactDOM from "react-dom";
+import { createPortal } from "react-dom";
 import {
   MapContainer, TileLayer, Circle, Marker,
   useMap, useMapEvents,
@@ -95,7 +95,7 @@ function MapClickHandler({ onMapClick }: { onMapClick: (p: [number, number]) => 
   return null;
 }
 function PortalModal({ children }: { children: React.ReactNode }) {
-  return ReactDOM.createPortal(children, document.body);
+  return createPortal(children, document.body);
 }
 
 /* 顯示名稱優先順序：device_name_custom → device_name_initial → device_name → mqtt_user */
