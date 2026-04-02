@@ -593,14 +593,23 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       if (!confirm(`確定要通知主帳號刪除「${displayName(dev)}」的分享？`)) return;
       const notifyVal = `${email} "要求刪除設備"`;
       try {
-        // 路一：用 RPC 寫入主帳號 owner row 的 notify（繞過 RLS）
-        const { error: rpcErr } = await supabase.rpc("request_delete_share", {
-          p_owner_email:  dev.share_from,
-          p_requester_id: email,
-          p_device_name:  dev.device_name,
-          p_mqtt_user:    dev.mqtt_user ?? "",
-        });
-        if (rpcErr) console.warn("[notify 路一 RPC]", rpcErr.message);
+        const { error: directErr } = await supabase
+          .from("device_credentials")
+          .update({ notify: notifyVal })
+          .eq("user_id", dev.share_from)
+          .eq("device_name", dev.device_name)
+          .eq("mqtt_user", dev.mqtt_user ?? "")
+          .eq("mqtt_pass", dev.mqtt_pass ?? "")
+          .is("share_from", null);
+        if (directErr) {
+          const { error: rpcErr } = await supabase.rpc("request_delete_share", {
+            p_owner_email: dev.share_from,
+            p_requester_id: email,
+            p_device_name: dev.device_name,
+            p_mqtt_user: dev.mqtt_user ?? "",
+          });
+          if (rpcErr) console.warn("[notify owner]", rpcErr.message);
+        }
 
         // 路二：直接更新被分享者自己那筆 share row 的 notify（保底）
         const { error: selfErr } = await supabase
@@ -796,14 +805,23 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     setLeaveLoading(true);
     const notifyVal = `${email} "要求刪除設備"`;
     try {
-      // 路一
-      const { error: rpcErr } = await supabase.rpc("request_delete_share", {
-        p_owner_email:  selectedDevice.share_from,
-        p_requester_id: email,
-        p_device_name:  selectedDevice.device_name,
-        p_mqtt_user:    selectedDevice.mqtt_user ?? "",
-      });
-      if (rpcErr) console.warn("[notify 路一 RPC]", rpcErr.message);
+      const { error: directErr } = await supabase
+        .from("device_credentials")
+        .update({ notify: notifyVal })
+        .eq("user_id", selectedDevice.share_from)
+        .eq("device_name", selectedDevice.device_name)
+        .eq("mqtt_user", selectedDevice.mqtt_user ?? "")
+        .eq("mqtt_pass", selectedDevice.mqtt_pass ?? "")
+        .is("share_from", null);
+      if (directErr) {
+        const { error: rpcErr } = await supabase.rpc("request_delete_share", {
+          p_owner_email: selectedDevice.share_from,
+          p_requester_id: email,
+          p_device_name: selectedDevice.device_name,
+          p_mqtt_user: selectedDevice.mqtt_user ?? "",
+        });
+        if (rpcErr) console.warn("[notify owner]", rpcErr.message);
+      }
 
       // 路二
       const { error: selfErr } = await supabase
