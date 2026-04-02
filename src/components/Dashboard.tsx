@@ -705,31 +705,25 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     }
   };
 
-  /* ── 被分享者：自行離開分享 ────────────────────────────────────────── */
+  /* ── 被分享者：自行離開分享 ────────────────────────────────────────────
+     不直接刪除，改為呼叫 RPC 在主帳號 owner row 的 notify 欄位寫入通知，
+     讓主帳號登入時看到提示並確認後才實際移除。                           */
   const handleLeaveShare = async () => {
     if (!selectedDevice?.share_from) return;
     setLeaveLoading(true);
     try {
-      // 先歸還次數（刪除前呼叫，確保 RPC 能找到此 row）
-      await supabase.rpc("return_share_count", {
-        p_owner_email: selectedDevice.share_from,
-        p_device_name: selectedDevice.device_name,
-        p_mqtt_user:   selectedDevice.mqtt_user ?? "",
+      const { error } = await supabase.rpc("request_delete_share", {
+        p_owner_email:  selectedDevice.share_from,
+        p_requester_id: email,
+        p_device_name:  selectedDevice.device_name,
+        p_mqtt_user:    selectedDevice.mqtt_user ?? "",
       });
-
-      // 再刪自己的 row
-      const { error } = await supabase
-        .from("device_credentials")
-        .delete()
-        .eq("id", selectedDevice.id);
       if (error) throw error;
 
-      const upd = devices.filter((d) => d.id !== selectedDevice.id);
-      setDevices(upd);
-      setSelectedDevice(upd[0] ?? null);
       setShowLeaveConfirm(false);
+      alert("已通知主帳號刪除，待主帳號確認後將移除分享。");
     } catch (err: any) {
-      alert("離開失敗：" + (err.message || err));
+      alert("通知失敗：" + (err.message || err));
     } finally {
       setLeaveLoading(false);
     }
