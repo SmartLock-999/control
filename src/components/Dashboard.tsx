@@ -529,12 +529,11 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       // 被分享者：寫入 notify 通知主帳號，不直接刪除
       if (!confirm(`確定要通知主帳號刪除「${displayName(dev)}」的分享？`)) return;
       try {
-        // 用 RPC 繞過 RLS，在主帳號 owner row 的 notify 欄位寫入通知
         const { error } = await supabase.rpc("request_delete_share", {
-          p_owner_email:   dev.share_from,
-          p_requester_id:  email,
-          p_device_name:   dev.device_name,
-          p_mqtt_user:     dev.mqtt_user ?? "",
+          p_owner_email:  dev.share_from,
+          p_requester_id: email,
+          p_device_name:  dev.device_name,
+          p_mqtt_user:    dev.mqtt_user ?? "",
         });
         if (error) throw error;
         alert("已通知主帳號刪除，待主帳號確認後將移除分享。");
@@ -545,13 +544,15 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   };
 
   /* ── 主帳號確認刪除通知 ──────────────────────────────────────────────
-     從 notify 欄位解析出要求者 email，刪除對應的 shared row，
-     並清空 owner row 的 notify，歸還分享次數。                          */
+     notify 格式：{requester_email} "要求刪除設備"
+     解析時取第一個空格前的部分作為 requester email。                    */
   const handleConfirmNotify = async (ownerDev: DeviceCredential) => {
     setNotifyProcessing(true);
     try {
-      // 解析 notify：格式為 "{requester_email}要求刪除設備"
-      const requesterEmail = (ownerDev.notify ?? "").replace("要求刪除設備", "").trim();
+      // 解析 notify：取第一個空格前的 email
+      const notifyVal = (ownerDev.notify ?? "").trim();
+      const requesterEmail = notifyVal.split(/\s+/)[0] ?? "";
+      if (!requesterEmail) throw new Error("無法解析要求者帳號");
 
       // 1. 刪除被分享者的 row
       const { error: delErr } = await supabase
@@ -1304,10 +1305,10 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
               <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto mb-3" />
               <h3 className="text-sm font-bold mb-1 text-orange-400">離開分享</h3>
               <p className="text-slate-300 text-xs mb-0.5">
-                確定要離開「{displayName(selectedDevice)}」的共享？
+                確定要通知主帳號移除「{displayName(selectedDevice)}」的分享？
               </p>
               <p className="text-slate-500 text-xs mb-4">
-                離開後將無法控制此設備，不影響設備主人的設定。
+                通知送出後，待主帳號確認後才會正式移除，在此之前仍可繼續使用設備。
               </p>
               <div className="flex gap-2">
                 <button onClick={() => setShowLeaveConfirm(false)} disabled={leaveLoading}
@@ -1318,7 +1319,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                   className="flex-1 py-2.5 rounded-xl bg-orange-600 text-white text-sm font-bold active:bg-orange-700 flex items-center justify-center gap-2">
                   {leaveLoading
                     ? <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                    : <><UserMinus className="w-4 h-4" />確認離開</>}
+                    : <><UserMinus className="w-4 h-4" />通知主帳號</>}
                 </button>
               </div>
             </div>
