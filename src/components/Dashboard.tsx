@@ -675,7 +675,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       setNotifyProcessing(false);
     }
   };
-     只更新 device_name_custom，device_name 完全不動。
+  /* 只更新 device_name_custom，device_name 完全不動。
      還原條件（寫入 null）：
        ① 輸入框清空（空字串）
        ② 輸入值等於 device_name_initial 或 device_name（原始名稱）
