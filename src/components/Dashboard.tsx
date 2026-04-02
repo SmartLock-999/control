@@ -50,13 +50,14 @@ const savedIcon = L.divIcon({
 interface DeviceCredential {
   id: string;
   device_name: string;
-  device_name_initial?: string | null;  // 供裝時複製，不再異動
-  device_name_custom?: string | null;   // 使用者自訂名稱
+  device_name_initial?: string | null;
+  device_name_custom?: string | null;
   mqtt_user?: string;
   mqtt_pass?: string;
-  server_no?: number | null;            // 供裝伺服器編號，對應 MQTT_List
+  server_no?: number | null;
   share_from?: string | null;
   share_count: number;
+  notify?: string | null;   // 被分享者要求刪除時填入，格式："{user_id}要求刪除設備"
 }
 interface SharedWithItem {
   id: string;           // device_credentials.id of the shared row
@@ -179,6 +180,11 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
   const [leaveLoading, setLeaveLoading]         = useState(false);
 
+  // 刪除通知（主帳號收到被分享者要求刪除的通知）
+  const [notifyList, setNotifyList] = useState<DeviceCredential[]>([]);  // 有 notify 的 owner rows
+  const [showNotifyModal, setShowNotifyModal] = useState(false);
+  const [notifyProcessing, setNotifyProcessing] = useState(false);
+
   const isOwnDevice    = !!(selectedDevice && !selectedDevice.share_from);
   // count 本身就代表剩餘次數（每次分享 -1）
   const shareRemaining = isOwnDevice ? (selectedDevice?.share_count ?? 0) : null;
@@ -190,7 +196,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       const [devResult, mqttResult] = await Promise.all([
         supabase
           .from("device_credentials")
-          .select("id, device_name, device_name_initial, device_name_custom, mqtt_user, mqtt_pass, server_no, share_from, count")
+          .select("id, device_name, device_name_initial, device_name_custom, mqtt_user, mqtt_pass, server_no, share_from, count, notify")
           .eq("user_id", email),
         supabase
           .from("mqtt_list")
@@ -232,6 +238,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         share_from: r.share_from ?? null,
         share_count: ownerCountMap[`${r.mqtt_user}|${r.mqtt_pass}|${r.device_name}`]
           ?? parseInt(String(r.count ?? 0), 10),
+        notify: r.notify ?? null,
       }));
 
       // 4. 自動補寫 device_name_initial（只寫一次，不覆蓋既有值）
@@ -250,6 +257,11 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
       setDevices(mapped);
       if (mapped.length && !selectedDevice) setSelectedDevice(mapped[0]);
+
+      // 5. 檢查主帳號 owner rows 是否有 notify（被分享者要求刪除通知）
+      const pending = mapped.filter((d) => !d.share_from && d.notify);
+      setNotifyList(pending);
+      if (pending.length > 0) setShowNotifyModal(true);
     } catch (err) { console.error("fetchDevices:", err); }
     finally { setLoading(false); }
   }, [email]);
@@ -489,48 +501,89 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
   /* ── 刪除設備 ──────────────────────────────────────────────────────────
      主帳號刪除：同時刪除所有 share_from = email 的分享 row（連帶清除）
-     分享來的設備刪除：只刪自己那筆，並呼叫 RPC 歸還主帳號分享次數      */
+     分享來的設備：不直接刪除，改為在主帳號 owner row 的 notify 欄位寫入要求，
+                   並顯示訊息提示使用者。                                  */
   const handleDeleteDevice = async (dev: DeviceCredential) => {
-    if (!confirm(`刪除「${displayName(dev)}」？`)) return;
-    try {
-      if (!dev.share_from) {
-        // 主帳號的設備：先刪所有被分享出去的 row（share_from = 自己 email）
+    if (!dev.share_from) {
+      // 主帳號刪除
+      if (!confirm(`刪除「${displayName(dev)}」？此操作將同時移除所有分享。`)) return;
+      try {
         await supabase
           .from("device_credentials")
           .delete()
           .eq("share_from", email)
           .eq("device_name", dev.device_name)
           .eq("mqtt_user", dev.mqtt_user ?? "");
-
-        // 再刪自己的 owner row
         await supabase
           .from("device_credentials")
           .delete()
           .eq("id", dev.id);
-      } else {
-        // 分享來的設備：先歸還次數（刪除前呼叫，確保 RPC 能找到此 row）
-        await supabase.rpc("return_share_count", {
-          p_owner_email: dev.share_from,
-          p_device_name: dev.device_name,
-          p_mqtt_user:   dev.mqtt_user ?? "",
-        });
-        // 再刪自己的 row
-        const { error: delErr } = await supabase
-          .from("device_credentials")
-          .delete()
-          .eq("id", dev.id);
-        if (delErr) throw delErr;
+      } catch (err: any) {
+        alert("刪除失敗：" + (err.message || err));
+        return;
       }
-    } catch (err: any) {
-      alert("刪除失敗：" + (err.message || err));
-      return;
+      const upd = devices.filter((d) => d.id !== dev.id);
+      setDevices(upd);
+      if (selectedDevice?.id === dev.id) setSelectedDevice(upd[0] ?? null);
+    } else {
+      // 被分享者：寫入 notify 通知主帳號，不直接刪除
+      if (!confirm(`確定要通知主帳號刪除「${displayName(dev)}」的分享？`)) return;
+      try {
+        // 用 RPC 繞過 RLS，在主帳號 owner row 的 notify 欄位寫入通知
+        const { error } = await supabase.rpc("request_delete_share", {
+          p_owner_email:   dev.share_from,
+          p_requester_id:  email,
+          p_device_name:   dev.device_name,
+          p_mqtt_user:     dev.mqtt_user ?? "",
+        });
+        if (error) throw error;
+        alert("已通知主帳號刪除，待主帳號確認後將移除分享。");
+      } catch (err: any) {
+        alert("通知失敗：" + (err.message || err));
+      }
     }
-    const upd = devices.filter((d) => d.id !== dev.id);
-    setDevices(upd);
-    if (selectedDevice?.id === dev.id) setSelectedDevice(upd[0] ?? null);
   };
 
-  /* ── 修改設備名稱 ──────────────────────────────────────────────────────
+  /* ── 主帳號確認刪除通知 ──────────────────────────────────────────────
+     從 notify 欄位解析出要求者 email，刪除對應的 shared row，
+     並清空 owner row 的 notify，歸還分享次數。                          */
+  const handleConfirmNotify = async (ownerDev: DeviceCredential) => {
+    setNotifyProcessing(true);
+    try {
+      // 解析 notify：格式為 "{requester_email}要求刪除設備"
+      const requesterEmail = (ownerDev.notify ?? "").replace("要求刪除設備", "").trim();
+
+      // 1. 刪除被分享者的 row
+      const { error: delErr } = await supabase
+        .from("device_credentials")
+        .delete()
+        .eq("user_id", requesterEmail)
+        .eq("device_name", ownerDev.device_name)
+        .eq("mqtt_user", ownerDev.mqtt_user ?? "")
+        .eq("share_from", email);
+      if (delErr) throw delErr;
+
+      // 2. 清空 notify 並 count + 1（歸還分享次數）
+      const { error: updErr } = await supabase
+        .from("device_credentials")
+        .update({
+          notify: null,
+          count: (ownerDev.share_count ?? 0) + 1,
+        })
+        .eq("id", ownerDev.id);
+      if (updErr) throw updErr;
+
+      // 3. 更新本地 notifyList
+      const remaining = notifyList.filter((d) => d.id !== ownerDev.id);
+      setNotifyList(remaining);
+      if (remaining.length === 0) setShowNotifyModal(false);
+      await fetchDevices();
+    } catch (err: any) {
+      alert("確認失敗：" + (err.message || err));
+    } finally {
+      setNotifyProcessing(false);
+    }
+  };
      只更新 device_name_custom，device_name 完全不動。
      還原條件（寫入 null）：
        ① 輸入框清空（空字串）
@@ -1337,6 +1390,72 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                   確認
                 </button>
               </div>
+            </div>
+          </div>
+        </PortalModal>
+      )}
+
+      {/* ══ 刪除通知 Modal（主帳號收到被分享者要求刪除）══ */}
+      {showNotifyModal && notifyList.length > 0 && (
+        <PortalModal>
+          <div className="fixed inset-0 bg-black/80 flex items-center justify-center px-4" style={{ zIndex: 99999 }}>
+            <div className="bg-slate-900 border border-orange-500/60 rounded-2xl p-5 w-full max-w-lg shadow-2xl">
+              {/* 醒目標題 */}
+              <div className="flex items-center gap-2 mb-4">
+                <span className="text-2xl">🔔</span>
+                <div>
+                  <h3 className="text-base font-bold text-orange-400">收到刪除分享通知</h3>
+                  <p className="text-xs text-slate-400">以下被分享者要求移除其分享</p>
+                </div>
+              </div>
+
+              <div className="space-y-3 mb-4 max-h-64 overflow-y-auto">
+                {notifyList.map((dev) => {
+                  const requester = (dev.notify ?? "").replace("要求刪除設備", "").trim();
+                  return (
+                    <div key={dev.id}
+                      className="bg-slate-800 border border-slate-700 rounded-xl px-4 py-3">
+                      <div className="flex items-start justify-between gap-2 mb-2">
+                        <div className="min-w-0">
+                          <p className="text-sm font-semibold text-white truncate">
+                            {displayName(dev)}
+                          </p>
+                          <p className="text-xs text-orange-300 mt-0.5 truncate">
+                            {requester} 要求刪除分享
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex gap-2 mt-2">
+                        <button
+                          onClick={() => {
+                            // 暫不處理，關閉後仍可在管理分享內撤銷
+                            const remaining = notifyList.filter((d) => d.id !== dev.id);
+                            setNotifyList(remaining);
+                            if (remaining.length === 0) setShowNotifyModal(false);
+                          }}
+                          disabled={notifyProcessing}
+                          className="flex-1 py-2 rounded-lg border border-slate-600 text-slate-300 text-xs font-medium active:bg-slate-700">
+                          稍後處理
+                        </button>
+                        <button
+                          onClick={() => handleConfirmNotify(dev)}
+                          disabled={notifyProcessing}
+                          className="flex-1 py-2 rounded-lg bg-orange-500 text-white text-xs font-bold active:bg-orange-600 flex items-center justify-center gap-1">
+                          {notifyProcessing
+                            ? <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                            : <><UserMinus className="w-3.5 h-3.5" />確認移除</>}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <button
+                onClick={() => setShowNotifyModal(false)}
+                className="w-full py-2.5 rounded-xl border border-slate-600 text-slate-300 text-sm font-medium active:bg-slate-800">
+                關閉（可在管理分享內處理）
+              </button>
             </div>
           </div>
         </PortalModal>
