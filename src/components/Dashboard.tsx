@@ -1159,24 +1159,29 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
               )}
             </div>
 
-            {/* 地圖本體：手機 h-52 / 桌面佔更多高度 */}
-            <div className="h-52 md:h-[420px] w-full overflow-hidden rounded-b-xl">
+            {/* 地圖本體：手機 h-72 / 桌面佔更多高度 */}
+            <div className="h-72 md:h-[520px] w-full overflow-hidden rounded-b-xl">
               <MapContainer
                 center={userPosition || DEFAULT_CENTER}
-                zoom={17} maxZoom={22}
-                zoomControl={false}
+                zoom={18} minZoom={3} maxZoom={22}
+                zoomControl={true}
                 style={{ height: "100%", width: "100%" }}
               >
                 {isStreetView ? (
                   <TileLayer key="street"
                     url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                    attribution="&copy; OSM"
-                    maxZoom={22} maxNativeZoom={19} keepBuffer={8} />
+                    attribution="&copy; <a href='https://www.openstreetmap.org/copyright'>OSM</a> contributors"
+                    maxZoom={22} maxNativeZoom={19} keepBuffer={8}
+                    tileSize={256} zoomOffset={0}
+                    detectRetina={true} />
                 ) : (
                   <TileLayer key="satellite"
-                    url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-                    attribution="&copy; Esri"
-                    maxZoom={22} maxNativeZoom={19} keepBuffer={8} crossOrigin="" />
+                    url="https://mt{s}.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"
+                    subdomains={["0","1","2","3"] as any}
+                    attribution="&copy; Google Maps"
+                    maxZoom={22} maxNativeZoom={21} keepBuffer={8}
+                    tileSize={256} zoomOffset={0}
+                    detectRetina={true} />
                 )}
                 <FlyTo target={flyTarget} />
                 <MapClickHandler onMapClick={setPendingLocation} />
