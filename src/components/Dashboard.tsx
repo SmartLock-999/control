@@ -201,7 +201,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const [notifyProcessing, setNotifyProcessing] = useState(false);
 
   // 返回鍵二次確認
-  const [backPressCount, setBackPressCount] = useState(0);
+  const backPressCount = React.useRef(0);
   const backPressTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 設定面板（齒輪展開）
@@ -356,21 +356,21 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
   /* ── Android 返回鍵二次確認 ── */
   useEffect(() => {
-    const handleBackButton = (e: PopStateEvent) => {
-      e.preventDefault();
-      if (backPressCount === 0) {
-        setBackPressCount(1);
+    const handleBackButton = () => {
+      if (backPressCount.current === 0) {
+        backPressCount.current = 1;
         setToastMsg("再按一次返回鍵跳出程式");
         if (backPressTimer.current) clearTimeout(backPressTimer.current);
         backPressTimer.current = setTimeout(() => {
-          setBackPressCount(0);
+          backPressCount.current = 0;
           setToastMsg(null);
         }, 2500);
         // 重新 push state 讓下次還能攔截
         window.history.pushState(null, "", window.location.href);
       } else {
         // 第二次按 → 真正離開
-        window.history.back();
+        if (backPressTimer.current) clearTimeout(backPressTimer.current);
+        window.history.go(-2);
       }
     };
     window.history.pushState(null, "", window.location.href);
@@ -379,7 +379,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       window.removeEventListener("popstate", handleBackButton);
       if (backPressTimer.current) clearTimeout(backPressTimer.current);
     };
-  }, [backPressCount]);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ── MQTT ── */
   const deviceId  = selectedDevice?.id;
