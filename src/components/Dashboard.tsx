@@ -1164,7 +1164,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
               <MapContainer
                 center={userPosition || DEFAULT_CENTER}
                 zoom={18} minZoom={3} maxZoom={22}
-                zoomControl={true}
+                zoomControl={false}
                 style={{ height: "100%", width: "100%" }}
               >
                 {isStreetView ? (
