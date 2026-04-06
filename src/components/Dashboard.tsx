@@ -200,6 +200,13 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const [showNotifyModal, setShowNotifyModal] = useState(false);
   const [notifyProcessing, setNotifyProcessing] = useState(false);
 
+  // 返回鍵二次確認
+  const [backPressCount, setBackPressCount] = useState(0);
+  const backPressTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // 設定面板（齒輪展開）
+  const [showSettingsPanel, setShowSettingsPanel] = useState(false);
+
   const isOwnDevice    = !!(selectedDevice && !selectedDevice.share_from);
   // count 本身就代表剩餘次數（每次分享 -1）
   const shareRemaining = isOwnDevice ? (selectedDevice?.share_count ?? 0) : null;
@@ -346,6 +353,33 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       { enableHighAccuracy: true, timeout: 8000 }
     );
   }, []); // 只在 mount 時執行一次
+
+  /* ── Android 返回鍵二次確認 ── */
+  useEffect(() => {
+    const handleBackButton = (e: PopStateEvent) => {
+      e.preventDefault();
+      if (backPressCount === 0) {
+        setBackPressCount(1);
+        setToastMsg("再按一次返回鍵跳出程式");
+        if (backPressTimer.current) clearTimeout(backPressTimer.current);
+        backPressTimer.current = setTimeout(() => {
+          setBackPressCount(0);
+          setToastMsg(null);
+        }, 2500);
+        // 重新 push state 讓下次還能攔截
+        window.history.pushState(null, "", window.location.href);
+      } else {
+        // 第二次按 → 真正離開
+        window.history.back();
+      }
+    };
+    window.history.pushState(null, "", window.location.href);
+    window.addEventListener("popstate", handleBackButton);
+    return () => {
+      window.removeEventListener("popstate", handleBackButton);
+      if (backPressTimer.current) clearTimeout(backPressTimer.current);
+    };
+  }, [backPressCount]);
 
   /* ── MQTT ── */
   const deviceId  = selectedDevice?.id;
@@ -911,96 +945,54 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
           {/* 設備選擇列 */}
           <div className="flex items-center gap-1.5 mb-2">
-            <div className="relative flex-1 min-w-0">
-              {/* 改名模式：顯示 input */}
-              {editingName && selectedDevice ? (
-                <div className="flex gap-1">
-                  <input
-                    autoFocus
-                    value={newDeviceName}
-                    onChange={(e) => setNewDeviceName(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") handleRenameDevice();
-                      if (e.key === "Escape") setEditingName(false);
-                    }}
-                    className="flex-1 bg-slate-800 border border-blue-500 text-white text-sm rounded-lg px-3 py-2 focus:outline-none"
-                    placeholder={`原始：${selectedDevice.device_name_initial?.trim() || selectedDevice.device_name?.trim() || ""}（清空可還原）`}
-                  />
-                  <button onClick={handleRenameDevice}
-                    className="px-3 py-2 bg-blue-600 text-white text-xs rounded-lg active:bg-blue-700 font-medium">
-                    確認
-                  </button>
-                  <button onClick={() => setEditingName(false)}
-                    className="px-2 py-2 bg-slate-700 text-slate-300 text-xs rounded-lg active:bg-slate-600">
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              ) : (
-                /* 正常模式：下拉 + 主帳號才能點擊改名 */
-                <div className="flex gap-1">
-                  <div className="relative flex-1 min-w-0">
-                    <select
-                      value={selectedDevice?.id ?? ""}
-                      onChange={(e) => setSelectedDevice(devices.find((d) => d.id === e.target.value) ?? null)}
-                      className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 appearance-none focus:outline-none focus:border-blue-500 pr-6"
-                    >
-                      {devices.length === 0 && <option value="">無設備</option>}
-                      {devices.map((d) => (
-                        <option key={d.id} value={d.id}>
-                          {d.share_from ? `⬦ ${displayName(d)}` : `● ${displayName(d)}`}
-                        </option>
-                      ))}
-                    </select>
-                    <div className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 text-xs">▾</div>
-                  </div>
-                  {/* 主帳號才顯示改名按鈕 */}
-                  {isOwnDevice && (
-                    <button
-                      onClick={() => { setNewDeviceName(displayName(selectedDevice)); setEditingName(true); }}
-                      className="p-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-400 active:bg-slate-700"
-                      title="修改設備名稱">
-                      <Pencil className="w-3.5 h-3.5" />
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {isOwnDevice ? (
+            {/* 改名模式 */}
+            {editingName && selectedDevice ? (
+              <div className="flex flex-1 gap-1">
+                <input
+                  autoFocus
+                  value={newDeviceName}
+                  onChange={(e) => setNewDeviceName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handleRenameDevice();
+                    if (e.key === "Escape") setEditingName(false);
+                  }}
+                  className="flex-1 bg-slate-800 border border-blue-500 text-white text-sm rounded-lg px-3 py-2 focus:outline-none"
+                  placeholder={`原始：${selectedDevice.device_name_initial?.trim() || selectedDevice.device_name?.trim() || ""}（清空可還原）`}
+                />
+                <button onClick={handleRenameDevice}
+                  className="px-3 py-2 bg-blue-600 text-white text-xs rounded-lg active:bg-blue-700 font-medium">
+                  確認
+                </button>
+                <button onClick={() => setEditingName(false)}
+                  className="px-2 py-2 bg-slate-700 text-slate-300 text-xs rounded-lg active:bg-slate-600">
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            ) : (
+              /* 正常模式：下拉（全寬）+ 齒輪設定 */
               <>
-                <button
-                  onClick={() => { setShareEmail(""); setShareError(""); setShowShareModal(true); }}
-                  disabled={(shareRemaining ?? 0) <= 0}
-                  className="p-2 rounded-lg bg-slate-800 border border-slate-700 text-blue-400 active:bg-blue-500/20 disabled:opacity-30 disabled:cursor-not-allowed"
-                  title="分享設備">
-                  <Share2 className="w-3.5 h-3.5" />
-                </button>
-                <button onClick={openManageModal}
-                  className="p-2 rounded-lg bg-slate-800 border border-slate-700 text-purple-400 active:bg-purple-500/20"
-                  title="管理分享">
-                  <Users className="w-3.5 h-3.5" />
-                </button>
-                <button onClick={() => selectedDevice && handleDeleteDevice(selectedDevice)}
-                  className="p-2 rounded-lg bg-slate-800 border border-slate-700 text-red-400 active:bg-red-500/20"
-                  title="刪除設備">
-                  <Trash2 className="w-3.5 h-3.5" />
+                <div className="relative flex-1 min-w-0">
+                  <select
+                    value={selectedDevice?.id ?? ""}
+                    onChange={(e) => setSelectedDevice(devices.find((d) => d.id === e.target.value) ?? null)}
+                    className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 appearance-none focus:outline-none focus:border-blue-500 pr-6"
+                  >
+                    {devices.length === 0 && <option value="">無設備</option>}
+                    {devices.map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.share_from ? `⬦ ${displayName(d)}` : `● ${displayName(d)}`}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 text-xs">▾</div>
+                </div>
+                <button onClick={() => setShowSettingsPanel(true)}
+                  className="p-2 rounded-lg bg-blue-500 text-white active:bg-blue-600 flex-shrink-0"
+                  title="設定">
+                  <Settings className="w-3.5 h-3.5" />
                 </button>
               </>
-            ) : selectedDevice?.share_from ? (
-              <button onClick={() => setShowLeaveConfirm(true)}
-                className="p-2 rounded-lg bg-slate-800 border border-orange-600/60 text-orange-400 active:bg-orange-500/20"
-                title="離開分享">
-                <UserMinus className="w-3.5 h-3.5" />
-              </button>
-            ) : null}
-            <button onClick={() => setShowResetConfirm(true)}
-              className="px-2.5 py-2 rounded-lg bg-red-500 text-white text-xs font-semibold active:bg-red-600">
-              重置
-            </button>
-            <button onClick={() => setShowCredentials(true)}
-              className="p-2 rounded-lg bg-blue-500 text-white active:bg-blue-600">
-              <Settings className="w-3.5 h-3.5" />
-            </button>
+            )}
           </div>
 
           {/* 手動控制 */}
@@ -1567,6 +1559,132 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                 onClick={() => setShowNotifyModal(false)}
                 className="w-full py-2.5 rounded-xl border border-slate-600 text-slate-300 text-sm font-medium active:bg-slate-800">
                 關閉（可在管理分享內處理）
+              </button>
+            </div>
+          </div>
+        </PortalModal>
+      )}
+
+      {/* ══ 設定面板 Sheet ══ */}
+      {showSettingsPanel && (
+        <PortalModal>
+          <div className="fixed inset-0 bg-black/70 flex items-end justify-center" style={{ zIndex: 99999 }}
+            onClick={() => setShowSettingsPanel(false)}>
+            <div className="bg-slate-900 border-t border-slate-700 rounded-t-2xl p-5 w-full max-w-lg"
+              onClick={(e) => e.stopPropagation()}>
+              <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto mb-3" />
+              <div className="flex items-center gap-2 mb-4">
+                <Settings className="w-4 h-4 text-blue-400" />
+                <h3 className="text-sm font-bold">設定</h3>
+                {selectedDevice && (
+                  <span className="text-xs text-slate-400 truncate ml-auto max-w-[160px]">
+                    {displayName(selectedDevice)}
+                  </span>
+                )}
+              </div>
+
+              <div className="space-y-2">
+                {/* 設備帳密 */}
+                {selectedDevice && (
+                  <div className="bg-slate-800 rounded-xl border border-slate-700 px-4 py-3">
+                    <p className="text-xs text-slate-400 mb-2">設備帳密</p>
+                    <div className="space-y-1.5">
+                      <div className="flex justify-between text-xs">
+                        <span className="text-slate-500">帳號</span>
+                        <span className="text-slate-200 font-mono">{selectedDevice.mqtt_user || "未設定"}</span>
+                      </div>
+                      <div className="flex justify-between text-xs">
+                        <span className="text-slate-500">密碼</span>
+                        <span className="text-slate-200 font-mono">{selectedDevice.mqtt_pass || "未設定"}</span>
+                      </div>
+                      {selectedDevice.share_from && (
+                        <div className="flex justify-between text-xs">
+                          <span className="text-slate-500">分享者</span>
+                          <span className="text-yellow-400 truncate max-w-[160px]">{selectedDevice.share_from}</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* 主帳號功能 */}
+                {isOwnDevice && (
+                  <>
+                    {/* 改名 */}
+                    <button
+                      onClick={() => { setShowSettingsPanel(false); setNewDeviceName(displayName(selectedDevice)); setEditingName(true); }}
+                      className="w-full flex items-center gap-3 px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl active:bg-slate-700 text-left">
+                      <Pencil className="w-4 h-4 text-slate-400 flex-shrink-0" />
+                      <div>
+                        <p className="text-sm text-slate-200">修改設備名稱</p>
+                        <p className="text-xs text-slate-500">自訂顯示名稱</p>
+                      </div>
+                    </button>
+
+                    {/* 分享 */}
+                    <button
+                      onClick={() => { setShowSettingsPanel(false); setShareEmail(""); setShareError(""); setShowShareModal(true); }}
+                      disabled={(shareRemaining ?? 0) <= 0}
+                      className="w-full flex items-center gap-3 px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl active:bg-slate-700 text-left disabled:opacity-40">
+                      <Share2 className="w-4 h-4 text-blue-400 flex-shrink-0" />
+                      <div className="flex-1">
+                        <p className="text-sm text-slate-200">分享設備</p>
+                        <p className="text-xs text-slate-500">剩餘 {shareRemaining}/{MAX_SHARES} 次</p>
+                      </div>
+                    </button>
+
+                    {/* 管理分享 */}
+                    <button
+                      onClick={() => { setShowSettingsPanel(false); openManageModal(); }}
+                      className="w-full flex items-center gap-3 px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl active:bg-slate-700 text-left">
+                      <Users className="w-4 h-4 text-purple-400 flex-shrink-0" />
+                      <div>
+                        <p className="text-sm text-slate-200">管理分享</p>
+                        <p className="text-xs text-slate-500">查看或撤銷已分享的帳號</p>
+                      </div>
+                    </button>
+
+                    {/* 刪除設備 */}
+                    <button
+                      onClick={() => { setShowSettingsPanel(false); selectedDevice && handleDeleteDevice(selectedDevice); }}
+                      className="w-full flex items-center gap-3 px-4 py-3 bg-slate-800 border border-red-500/30 rounded-xl active:bg-red-500/10 text-left">
+                      <Trash2 className="w-4 h-4 text-red-400 flex-shrink-0" />
+                      <div>
+                        <p className="text-sm text-red-400">刪除設備</p>
+                        <p className="text-xs text-slate-500">從帳號移除此設備</p>
+                      </div>
+                    </button>
+                  </>
+                )}
+
+                {/* 被分享者：離開分享 */}
+                {selectedDevice?.share_from && (
+                  <button
+                    onClick={() => { setShowSettingsPanel(false); setShowLeaveConfirm(true); }}
+                    className="w-full flex items-center gap-3 px-4 py-3 bg-slate-800 border border-orange-500/30 rounded-xl active:bg-orange-500/10 text-left">
+                    <UserMinus className="w-4 h-4 text-orange-400 flex-shrink-0" />
+                    <div>
+                      <p className="text-sm text-orange-400">離開分享</p>
+                      <p className="text-xs text-slate-500">通知主帳號移除分享</p>
+                    </div>
+                  </button>
+                )}
+
+                {/* 重置 */}
+                <button
+                  onClick={() => { setShowSettingsPanel(false); setShowResetConfirm(true); }}
+                  className="w-full flex items-center gap-3 px-4 py-3 bg-slate-800 border border-red-500/40 rounded-xl active:bg-red-500/10 text-left">
+                  <LogOut className="w-4 h-4 text-red-500 flex-shrink-0" />
+                  <div>
+                    <p className="text-sm text-red-400 font-semibold">重置帳號</p>
+                    <p className="text-xs text-slate-500">清除所有設備資料</p>
+                  </div>
+                </button>
+              </div>
+
+              <button onClick={() => setShowSettingsPanel(false)}
+                className="w-full mt-4 py-2.5 rounded-xl border border-slate-600 text-slate-300 text-sm font-medium active:bg-slate-800">
+                關閉
               </button>
             </div>
           </div>
