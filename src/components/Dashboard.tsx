@@ -140,6 +140,8 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const [selectedDevice, setSelectedDevice] = useState<DeviceCredential | null>(null);
   const [loading, setLoading]               = useState(true);
   const [mqttStatus, setMqttStatus]         = useState("Disconnected");
+  // 設備連線狀態（依 LWT status topic）：null=尚未收到, true=online, false=offline
+  const [deviceOnline, setDeviceOnline]     = useState<boolean | null>(null);
   const [showCredentials, setShowCredentials]   = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [resetting, setResetting]           = useState(false);
@@ -395,17 +397,43 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     if (!brokerUrl) {
       console.warn(`[MQTT] server_no=${serverNo} 在 mqttList 中找不到對應 URL`);
       setMqttStatus("Disconnected");
+      setDeviceOnline(null);
       return;
     }
 
     let isActive = true;
     setMqttStatus("Connecting...");
+    setDeviceOnline(null); // 切換設備時重置為「尚未收到」
     const client = connectMqtt(brokerUrl, {
       username: mqttUser, password: mqttPass,
       clientId: `web_${Math.random().toString(36).slice(2, 9)}`,
       reconnectPeriod: 3000, keepalive: 30,
     });
-    client.on("connect",   () => { if (isActive) setMqttStatus("Connected"); });
+    client.on("connect", () => {
+      if (!isActive) return;
+      setMqttStatus("Connected");
+      // 訂閱設備狀態 topic（含 retained LWT）
+      const statusTopic = `device/${mqttUser}/${selectedDevice?.device_name}/status`;
+      client.subscribe(statusTopic, { qos: 1 }, (err) => {
+        if (err) console.warn("[MQTT] subscribe status failed:", err);
+      });
+    });
+    client.on("message", (topic: string, payload: Buffer) => {
+      if (!isActive) return;
+      const devName = selectedDevice?.device_name;
+      const expectedTopic = `device/${mqttUser}/${devName}/status`;
+      if (topic !== expectedTopic) return;
+      try {
+        const msg = JSON.parse(payload.toString());
+        if (msg?.action === "offline") {
+          setDeviceOnline(false);
+        } else {
+          setDeviceOnline(true);
+        }
+      } catch {
+        setDeviceOnline(true); // 非 JSON → 視為 online
+      }
+    });
     client.on("error",     () => { if (isActive) setMqttStatus("Error"); });
     client.on("close",     () => { if (isActive) setMqttStatus("Disconnected"); });
     client.on("reconnect", () => { if (isActive) setMqttStatus("Connecting..."); });
@@ -882,6 +910,12 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const statusColor = mqttStatus === "Connected" ? "bg-green-500"
     : mqttStatus === "Connecting..." ? "bg-yellow-500 animate-pulse" : "bg-red-500";
 
+  // 設備上線偵測顯示
+  const deviceStatusLabel = deviceOnline === null ? "..." : deviceOnline ? "Connected" : "Disconnected";
+  const deviceStatusColor = deviceOnline === null
+    ? "bg-slate-500"
+    : deviceOnline ? "bg-green-500" : "bg-red-500 animate-pulse";
+
   /* ══════════════════════════════ RENDER ══ */
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-sans select-none">
@@ -891,8 +925,11 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         <div className="flex items-center gap-3">
           <h1 className="text-base font-bold tracking-tight">Smart Lock</h1>
           <div className="hidden md:flex items-center gap-1.5">
-            <div className={`w-1.5 h-1.5 rounded-full ${statusColor}`} />
-            <span className="text-slate-500 text-xs">{mqttStatus}</span>
+            <div className={`w-1.5 h-1.5 rounded-full ${deviceStatusColor}`} />
+            <span className={`text-xs ${
+              deviceOnline === null ? "text-slate-500"
+              : deviceOnline ? "text-green-400" : "text-red-400"
+            }`}>{deviceStatusLabel}</span>
           </div>
         </div>
         <div className="flex items-center gap-3">
@@ -922,9 +959,12 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           {/* 手機版連線狀態 + 設備名稱同排 */}
           <div className="flex items-center justify-between gap-2 mb-2 md:hidden">
             <div className="flex items-center gap-2 flex-shrink-0">
-              <span className="text-slate-500 text-xs">控制面板</span>
-              <div className={`w-1.5 h-1.5 rounded-full ${statusColor}`} />
-              <span className="text-slate-500 text-xs">{mqttStatus}</span>
+              <span className="text-slate-500 text-xs">伺服器</span>
+              <div className={`w-1.5 h-1.5 rounded-full ${deviceStatusColor}`} />
+              <span className={`text-xs ${
+                deviceOnline === null ? "text-slate-500"
+                : deviceOnline ? "text-green-400" : "text-red-400"
+              }`}>{deviceStatusLabel}</span>
             </div>
             {selectedDevice && (
               <span className="text-sm font-semibold text-slate-200 truncate text-right">
@@ -936,7 +976,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           {/* 桌面版分享剩餘（因頂部欄空間有限，在左欄補充顯示）*/}
           {shareRemaining !== null && (
             <div className="hidden md:flex items-center justify-between mb-2 px-1">
-              <span className="text-xs text-slate-500">設備控制</span>
+              <span className="text-xs text-slate-500">伺服器</span>
               <span className={`text-xs px-2 py-0.5 rounded-full border ${
                 shareRemaining > 0 ? "border-slate-600 text-slate-400" : "border-red-500/60 text-red-400"
               }`}>分享剩餘 {shareRemaining}/{MAX_SHARES}</span>
