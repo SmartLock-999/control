@@ -925,11 +925,8 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         <div className="flex items-center gap-3">
           <h1 className="text-base font-bold tracking-tight">Smart Lock</h1>
           <div className="hidden md:flex items-center gap-1.5">
-            <div className={`w-1.5 h-1.5 rounded-full ${deviceStatusColor}`} />
-            <span className={`text-xs ${
-              deviceOnline === null ? "text-slate-500"
-              : deviceOnline ? "text-green-400" : "text-red-400"
-            }`}>{deviceStatusLabel}</span>
+            <div className={`w-1.5 h-1.5 rounded-full ${statusColor}`} />
+            <span className="text-slate-500 text-xs">{mqttStatus}</span>
           </div>
         </div>
         <div className="flex items-center gap-3">
@@ -960,11 +957,8 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           <div className="flex items-center justify-between gap-2 mb-2 md:hidden">
             <div className="flex items-center gap-2 flex-shrink-0">
               <span className="text-slate-500 text-xs">伺服器</span>
-              <div className={`w-1.5 h-1.5 rounded-full ${deviceStatusColor}`} />
-              <span className={`text-xs ${
-                deviceOnline === null ? "text-slate-500"
-                : deviceOnline ? "text-green-400" : "text-red-400"
-              }`}>{deviceStatusLabel}</span>
+              <div className={`w-1.5 h-1.5 rounded-full ${statusColor}`} />
+              <span className="text-slate-500 text-xs">{mqttStatus}</span>
             </div>
             {selectedDevice && (
               <span className="text-sm font-semibold text-slate-200 truncate text-right">
@@ -1015,7 +1009,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                   <select
                     value={selectedDevice?.id ?? ""}
                     onChange={(e) => setSelectedDevice(devices.find((d) => d.id === e.target.value) ?? null)}
-                    className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 appearance-none focus:outline-none focus:border-blue-500 pr-6"
+                    className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 appearance-none focus:outline-none focus:border-blue-500 pr-16"
                   >
                     {devices.length === 0 && <option value="">無設備</option>}
                     {devices.map((d) => (
@@ -1024,6 +1018,14 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                       </option>
                     ))}
                   </select>
+                  {/* 設備連線狀態指示（右側）*/}
+                  <div className="pointer-events-none absolute right-7 top-1/2 -translate-y-1/2 flex items-center gap-1">
+                    <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${deviceStatusColor}`} />
+                    <span className={`text-[10px] font-medium leading-none ${
+                      deviceOnline === null ? "text-slate-500"
+                      : deviceOnline ? "text-green-400" : "text-red-400"
+                    }`}>{deviceStatusLabel}</span>
+                  </div>
                   <div className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 text-xs">▾</div>
                 </div>
                 <button onClick={() => setShowSettingsPanel(true)}
