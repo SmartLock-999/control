@@ -360,22 +360,56 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   useEffect(() => {
     if (!navigator.geolocation) return;
 
-    const uploadPosition = () => {
+    const uploadPosition = async () => {
+      // 取得目前登入 user 的 uuid（對應 positions.user_id uuid 欄位）
+      const { data: { user } } = await supabase.auth.getUser();
+      const uid = user?.id;
+      if (!uid) return;
+
       navigator.geolocation.getCurrentPosition(
         async (pos) => {
           const { latitude, longitude, accuracy } = pos.coords;
           const now = new Date().toISOString();
-          await supabase.from("positions").upsert(
-            {
-              user_id:     email,
-              lat:         latitude,
-              lng:         longitude,
-              accuracy_m:  accuracy != null ? Math.round(accuracy) : null,
-              source:      "gps",
-              captured_at: now,
-            },
-            { onConflict: "user_id" }   // 每個帳號只保留最新一筆
-          );
+
+          // 先查是否已有此 user_id 的紀錄
+          const { data: existing, error: selErr } = await supabase
+            .from("positions")
+            .select("id")
+            .eq("user_id", uid)
+            .maybeSingle();
+
+          if (selErr) {
+            console.warn("[positions] select 失敗:", selErr.message);
+            return;
+          }
+
+          if (existing?.id) {
+            // 已有紀錄 → UPDATE
+            const { error: updErr } = await supabase
+              .from("positions")
+              .update({
+                lat:         latitude,
+                lng:         longitude,
+                accuracy_m:  accuracy != null ? Math.round(accuracy) : null,
+                source:      "gps",
+                captured_at: now,
+              })
+              .eq("id", existing.id);
+            if (updErr) console.warn("[positions] update 失敗:", updErr.message);
+          } else {
+            // 尚無紀錄 → INSERT
+            const { error: insErr } = await supabase
+              .from("positions")
+              .insert({
+                user_id:     uid,
+                lat:         latitude,
+                lng:         longitude,
+                accuracy_m:  accuracy != null ? Math.round(accuracy) : null,
+                source:      "gps",
+                captured_at: now,
+              });
+            if (insErr) console.warn("[positions] insert 失敗:", insErr.message);
+          }
         },
         (err) => console.warn("[positions] GPS 失敗:", err.message),
         { enableHighAccuracy: true, timeout: 10000 }
