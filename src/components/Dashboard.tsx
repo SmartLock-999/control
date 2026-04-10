@@ -369,22 +369,33 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         async (pos) => {
           const { latitude, longitude, accuracy } = pos.coords;
           const now = new Date().toISOString();
+          const payload = {
+            lat:         latitude,
+            lng:         longitude,
+            accuracy_m:  accuracy != null ? Math.round(accuracy) : null,
+            source:      "gps",
+            captured_at: now,
+          };
 
-          // 不論有無紀錄，直接 upsert（強制覆蓋）
-          const { error } = await supabase
+          // 先嘗試 UPDATE
+          const { data: updated, error: updErr } = await supabase
             .from("positions")
-            .upsert(
-              {
-                user_id:     uid,
-                lat:         latitude,
-                lng:         longitude,
-                accuracy_m:  accuracy != null ? Math.round(accuracy) : null,
-                source:      "gps",
-                captured_at: now,
-              },
-              { onConflict: "user_id" }
-            );
-          if (error) console.warn("[positions] upsert 失敗:", error.message);
+            .update(payload)
+            .eq("user_id", uid)
+            .select("id");
+
+          if (updErr) {
+            console.warn("[positions] update 失敗:", updErr.message);
+            return;
+          }
+
+          // UPDATE 影響 0 筆 → 該帳號尚無紀錄，改 INSERT
+          if (!updated || updated.length === 0) {
+            const { error: insErr } = await supabase
+              .from("positions")
+              .insert({ user_id: uid, ...payload });
+            if (insErr) console.warn("[positions] insert 失敗:", insErr.message);
+          }
         },
         (err) => console.warn("[positions] GPS 失敗:", err.message),
         { enableHighAccuracy: true, timeout: 10000 }
