@@ -356,12 +356,11 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     );
   }, []); // 只在 mount 時執行一次
 
-  /* ── 每 3 分鐘將定位上傳至 positions ── */
+  /* ── 登入時上傳定位至 positions（一次性）── */
   useEffect(() => {
     if (!navigator.geolocation) return;
 
     const uploadPosition = async () => {
-      // 取得目前登入 user 的 uuid（對應 positions.user_id uuid 欄位）
       const { data: { user } } = await supabase.auth.getUser();
       const uid = user?.id;
       if (!uid) return;
@@ -371,7 +370,6 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           const { latitude, longitude, accuracy } = pos.coords;
           const now = new Date().toISOString();
 
-          // 先查是否已有此 user_id 的紀錄
           const { data: existing, error: selErr } = await supabase
             .from("positions")
             .select("id")
@@ -384,7 +382,6 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           }
 
           if (existing?.id) {
-            // 已有紀錄 → UPDATE
             const { error: updErr } = await supabase
               .from("positions")
               .update({
@@ -397,7 +394,6 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
               .eq("id", existing.id);
             if (updErr) console.warn("[positions] update 失敗:", updErr.message);
           } else {
-            // 尚無紀錄 → INSERT
             const { error: insErr } = await supabase
               .from("positions")
               .insert({
@@ -416,10 +412,8 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       );
     };
 
-    uploadPosition(); // 登入後立即上傳一次
-    const timer = setInterval(uploadPosition, 3 * 60 * 1000); // 每 3 分鐘
-    return () => clearInterval(timer);
-  }, [email]); // eslint-disable-line react-hooks/exhaustive-deps
+    uploadPosition();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ── Android 返回鍵二次確認 ── */
   useEffect(() => {
