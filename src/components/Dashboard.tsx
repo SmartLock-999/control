@@ -356,6 +356,37 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     );
   }, []); // 只在 mount 時執行一次
 
+  /* ── 每 3 分鐘將定位上傳至 positions ── */
+  useEffect(() => {
+    if (!navigator.geolocation) return;
+
+    const uploadPosition = () => {
+      navigator.geolocation.getCurrentPosition(
+        async (pos) => {
+          const { latitude, longitude, accuracy } = pos.coords;
+          const now = new Date().toISOString();
+          await supabase.from("positions").upsert(
+            {
+              user_id:     email,
+              lat:         latitude,
+              lng:         longitude,
+              accuracy_m:  accuracy != null ? Math.round(accuracy) : null,
+              source:      "gps",
+              captured_at: now,
+            },
+            { onConflict: "user_id" }   // 每個帳號只保留最新一筆
+          );
+        },
+        (err) => console.warn("[positions] GPS 失敗:", err.message),
+        { enableHighAccuracy: true, timeout: 10000 }
+      );
+    };
+
+    uploadPosition(); // 登入後立即上傳一次
+    const timer = setInterval(uploadPosition, 3 * 60 * 1000); // 每 3 分鐘
+    return () => clearInterval(timer);
+  }, [email]); // eslint-disable-line react-hooks/exhaustive-deps
+
   /* ── Android 返回鍵二次確認 ── */
   useEffect(() => {
     const handleBackButton = () => {
