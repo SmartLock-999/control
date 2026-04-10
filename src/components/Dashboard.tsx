@@ -356,7 +356,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     );
   }, []); // 只在 mount 時執行一次
 
-  /* ── 登入時上傳定位至 positions（一次性）── */
+  /* ── 登入時上傳定位，之後每分鐘強制更新（positions 保持最新）── */
   useEffect(() => {
     if (!navigator.geolocation) return;
 
@@ -370,49 +370,30 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           const { latitude, longitude, accuracy } = pos.coords;
           const now = new Date().toISOString();
 
-          const { data: existing, error: selErr } = await supabase
+          // 不論有無紀錄，直接 upsert（強制覆蓋）
+          const { error } = await supabase
             .from("positions")
-            .select("id")
-            .eq("user_id", uid)
-            .maybeSingle();
-
-          if (selErr) {
-            console.warn("[positions] select 失敗:", selErr.message);
-            return;
-          }
-
-          if (existing?.id) {
-            const { error: updErr } = await supabase
-              .from("positions")
-              .update({
-                lat:         latitude,
-                lng:         longitude,
-                accuracy_m:  accuracy != null ? Math.round(accuracy) : null,
-                source:      "gps",
-                captured_at: now,
-              })
-              .eq("id", existing.id);
-            if (updErr) console.warn("[positions] update 失敗:", updErr.message);
-          } else {
-            const { error: insErr } = await supabase
-              .from("positions")
-              .insert({
+            .upsert(
+              {
                 user_id:     uid,
                 lat:         latitude,
                 lng:         longitude,
                 accuracy_m:  accuracy != null ? Math.round(accuracy) : null,
                 source:      "gps",
                 captured_at: now,
-              });
-            if (insErr) console.warn("[positions] insert 失敗:", insErr.message);
-          }
+              },
+              { onConflict: "user_id" }
+            );
+          if (error) console.warn("[positions] upsert 失敗:", error.message);
         },
         (err) => console.warn("[positions] GPS 失敗:", err.message),
         { enableHighAccuracy: true, timeout: 10000 }
       );
     };
 
-    uploadPosition();
+    uploadPosition(); // 登入後立即執行一次
+    const timer = setInterval(uploadPosition, 60 * 1000); // 每 1 分鐘強制更新
+    return () => clearInterval(timer);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ── Android 返回鍵二次確認 ── */
