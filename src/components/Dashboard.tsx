@@ -10,7 +10,7 @@ import {
   LogOut, Settings, Share2, Trash2, X, MapPin, UserMinus, Users, Pencil,
 } from "lucide-react";
 import { supabase } from "../utils/supabaseClient";
-import { connectMqtt, publishMqtt, disconnectMqtt } from "../utils/mqttClient";
+import { connectMqtt, publishMqtt } from "../utils/mqttClient";
 
 delete (L.Icon.Default.prototype as any)._getIconUrl;
 L.Icon.Default.mergeOptions({
@@ -139,7 +139,8 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const [devices, setDevices]               = useState<DeviceCredential[]>([]);
   const [selectedDevice, setSelectedDevice] = useState<DeviceCredential | null>(null);
   const [loading, setLoading]               = useState(true);
-  const [mqttStatus, setMqttStatus]         = useState("Disconnected");
+  // 每台設備各別維護連線狀態：key = device.id
+  const [mqttStatusMap, setMqttStatusMap]   = useState<Record<string, string>>({});
   const [showCredentials, setShowCredentials]   = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [resetting, setResetting]           = useState(false);
@@ -381,37 +382,50 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /* ── MQTT ── */
-  const deviceId  = selectedDevice?.id;
-  const mqttUser  = selectedDevice?.mqtt_user;
-  const mqttPass  = selectedDevice?.mqtt_pass;
-  const serverNo  = selectedDevice?.server_no;
-
+  /* ── MQTT：每台設備各別建立連線，各別追蹤狀態 ── */
   useEffect(() => {
-    if (!mqttUser || !mqttPass) return;
+    if (!devices.length || !mqttList) return;
 
-    // 依 device_credentials 的 server_no 比對 mqttList，取得對應 Broker URL
-    const brokerUrl = getBrokerUrl(selectedDevice, mqttList);
-    if (!brokerUrl) {
-      console.warn(`[MQTT] server_no=${serverNo} 在 mqttList 中找不到對應 URL`);
-      setMqttStatus("Disconnected");
-      return;
-    }
+    // 只針對有完整憑證的設備建立連線
+    const validDevices = devices.filter(
+      (d) => d.mqtt_user && d.mqtt_pass && getBrokerUrl(d, mqttList)
+    );
+    if (!validDevices.length) return;
 
-    let isActive = true;
-    setMqttStatus("Connecting...");
-    const client = connectMqtt(brokerUrl, {
-      username: mqttUser, password: mqttPass,
-      clientId: `web_${Math.random().toString(36).slice(2, 9)}`,
-      reconnectPeriod: 3000, keepalive: 30,
+    // 初始化所有設備為 Connecting...
+    setMqttStatusMap((prev) => {
+      const next = { ...prev };
+      validDevices.forEach((d) => { if (!next[d.id]) next[d.id] = "Connecting..."; });
+      return next;
     });
-    client.on("connect",   () => { if (isActive) setMqttStatus("Connected"); });
-    client.on("error",     () => { if (isActive) setMqttStatus("Error"); });
-    client.on("close",     () => { if (isActive) setMqttStatus("Disconnected"); });
-    client.on("reconnect", () => { if (isActive) setMqttStatus("Connecting..."); });
-    return () => { isActive = false; disconnectMqtt(); };
+
+    // 為每台設備建立獨立 MQTT 連線，回傳 cleanup 函式陣列
+    const cleanups: (() => void)[] = validDevices.map((d) => {
+      const brokerUrl = getBrokerUrl(d, mqttList)!;
+      const id = d.id;
+      let isActive = true;
+
+      const setStatus = (s: string) => {
+        if (isActive) setMqttStatusMap((prev) => ({ ...prev, [id]: s }));
+      };
+
+      setStatus("Connecting...");
+      const client = connectMqtt(brokerUrl, {
+        username: d.mqtt_user!, password: d.mqtt_pass!,
+        clientId: `web_${id.slice(0, 6)}_${Math.random().toString(36).slice(2, 6)}`,
+        reconnectPeriod: 3000, keepalive: 30,
+      });
+      client.on("connect",   () => setStatus("Connected"));
+      client.on("error",     () => setStatus("Error"));
+      client.on("close",     () => setStatus("Disconnected"));
+      client.on("reconnect", () => setStatus("Connecting..."));
+
+      return () => { isActive = false; try { client.end(true); } catch {} };
+    });
+
+    return () => { cleanups.forEach((fn) => fn()); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [deviceId, mqttUser, mqttPass, serverNo, mqttList]);
+  }, [devices.map((d) => d.id).join(","), JSON.stringify(mqttList)]);
 
   /* ── 登出 ── */
   const handleLogout = async () => {
@@ -917,6 +931,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     </div>
   );
 
+  const mqttStatus = (selectedDevice ? mqttStatusMap[selectedDevice.id] : null) ?? "Disconnected";
   const statusColor = mqttStatus === "Connected" ? "bg-green-500"
     : mqttStatus === "Connecting..." ? "bg-yellow-500 animate-pulse" : "bg-red-500";
 
