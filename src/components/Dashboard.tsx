@@ -10,7 +10,6 @@ import {
   LogOut, Settings, Share2, Trash2, X, MapPin, UserMinus, Users, Pencil,
 } from "lucide-react";
 import { supabase } from "../utils/supabaseClient";
-import { publishMqtt } from "../utils/mqttClient";
 import mqtt from "mqtt";
 
 delete (L.Icon.Default.prototype as any)._getIconUrl;
@@ -211,6 +210,9 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
   // 設定面板（齒輪展開）
   const [showSettingsPanel, setShowSettingsPanel] = useState(false);
+
+  // 儲存各 server_no 的 MQTT client，供 handleControl 發布指令
+  const mqttClientsRef = React.useRef<Record<number, mqtt.MqttClient>>({});
 
   const isOwnDevice    = !!(selectedDevice && !selectedDevice.share_from);
   // count 本身就代表剩餘次數（每次分享 -1）
@@ -500,6 +502,9 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         clean: true,
       });
 
+      // 儲存 client 供 handleControl 發布指令使用
+      mqttClientsRef.current[no] = client;
+
       client.on("connect", () => {
         if (!isActive) return;
         setServerStatusMap((prev) => ({ ...prev, [no]: "Online" }));
@@ -544,6 +549,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
       cleanups.push(() => {
         isActive = false;
+        delete mqttClientsRef.current[no];
         try { client.end(true); } catch {}
       });
     });
@@ -581,11 +587,17 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       alert(`設備「${displayName(selectedDevice)}」的伺服器（server_no=${selectedDevice.server_no ?? 1}）URL 未設定，請確認 mqtt_servers 資料表`);
       return;
     }
+    const no = (selectedDevice.server_no != null && selectedDevice.server_no > 0)
+      ? selectedDevice.server_no : 1;
+    const client = mqttClientsRef.current[no];
+    if (!client || !client.connected) {
+      alert("伺服器尚未連線，請稍候再試");
+      return;
+    }
     const pin = action === "open" ? "D4" : action === "stop" ? "D18" : "D19";
-    publishMqtt(
-      `device/${selectedDevice.mqtt_user}/${selectedDevice.device_name}/command`,
-      JSON.stringify({ action, pin, ts: Math.floor(Date.now() / 1000) })
-    );
+    const topic = `device/${selectedDevice.mqtt_user}/${selectedDevice.device_name}/command`;
+    const payload = JSON.stringify({ action, pin, ts: Math.floor(Date.now() / 1000) });
+    client.publish(topic, payload, { qos: 1 });
     // 按壓動畫
     setTriggeredAction(action);
     setTimeout(() => setTriggeredAction(null), 1200);
