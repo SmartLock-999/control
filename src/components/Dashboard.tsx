@@ -591,17 +591,13 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const confirmAddLocation = async () => {
     if (!pendingLocation) return;
     const label = pendingName.trim() || `地點 ${savedLocations.length + 1}`;
+    // 快照座標，避免 state 清空後遺失
+    const lat = pendingLocation[0];
+    const lng = pendingLocation[1];
 
-    // 取得目前登入使用者的 user_id（auth session）
-    let userId: string | null = null;
-    try {
-      const { data: sessionData } = await supabase.auth.getSession();
-      userId = sessionData?.session?.user?.id ?? null;
-    } catch { /* 靜默失敗，不影響本地儲存 */ }
-
-    // 產生本地 id，之後若 DB INSERT 成功再用 DB 回傳的 id 替換
+    // 先更新本地 state（UI 即時反應）
     const localId = Date.now().toString();
-    const newEntry: SavedLocation = { id: localId, label, position: pendingLocation };
+    const newEntry: SavedLocation = { id: localId, label, position: [lat, lng] };
     const upd = [...savedLocations, newEntry];
     setSavedLocations(upd);
     setActiveLocIdx(upd.length - 1);
@@ -609,21 +605,34 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     setPendingName("");
     setShowNameModal(false);
 
+    // 取得 user_id：優先用 auth session，備援從 registered_emails 查 email
+    let userId: string | null = null;
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      userId = sessionData?.session?.user?.id ?? null;
+    } catch { /* 靜默 */ }
+
+    if (!userId) {
+      try {
+        const { data: regRow } = await supabase
+          .from("registered_emails")
+          .select("user_id")
+          .eq("email", email)
+          .maybeSingle();
+        userId = regRow?.user_id ?? null;
+      } catch { /* 靜默 */ }
+    }
+
     // 上傳至 Supabase locations 資料表
     if (userId) {
       try {
         const { data: inserted, error } = await supabase
           .from("locations")
-          .insert({
-            user_id: userId,
-            name: label,
-            lat: pendingLocation[0],
-            lng: pendingLocation[1],
-          })
+          .insert({ user_id: userId, name: label, lat, lng })
           .select("id")
           .single();
         if (!error && inserted?.id) {
-          // 用 DB 回傳的 UUID 替換本地 id
+          // 用 DB 回傳的 UUID 替換本地暫時 id
           setSavedLocations((prev) =>
             prev.map((loc) => loc.id === localId ? { ...loc, id: inserted.id } : loc)
           );
@@ -633,6 +642,8 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       } catch (err) {
         console.warn("[locations] 上傳例外:", err);
       }
+    } else {
+      console.warn("[locations] 無法取得 user_id，跳過上傳");
     }
   };
 
@@ -1119,6 +1130,13 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                 <div className="flex justify-between text-xs">
                   <span className="text-slate-500">密碼</span>
                   <span className="text-slate-300 font-mono">{selectedDevice.mqtt_pass || "未設定"}</span>
+                </div>
+                <div className="flex justify-between items-center text-xs">
+                  <span className="text-slate-500">連線狀態</span>
+                  <span className="flex items-center gap-1">
+                    <div className={`w-1.5 h-1.5 rounded-full ${statusColor}`} />
+                    <span className="text-slate-300">{mqttStatus}</span>
+                  </span>
                 </div>
                 {selectedDevice.share_from && (
                   <div className="flex justify-between text-xs">
