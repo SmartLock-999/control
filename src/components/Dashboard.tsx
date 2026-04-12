@@ -605,45 +605,24 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     setPendingName("");
     setShowNameModal(false);
 
-    // 取得 user_id：優先用 auth session，備援從 registered_emails 查 email
-    let userId: string | null = null;
-    try {
-      const { data: sessionData } = await supabase.auth.getSession();
-      userId = sessionData?.session?.user?.id ?? null;
-    } catch { /* 靜默 */ }
-
-    if (!userId) {
-      try {
-        const { data: regRow } = await supabase
-          .from("registered_emails")
-          .select("user_id")
-          .eq("email", email)
-          .maybeSingle();
-        userId = regRow?.user_id ?? null;
-      } catch { /* 靜默 */ }
-    }
-
     // 上傳至 Supabase locations 資料表
-    if (userId) {
-      try {
-        const { data: inserted, error } = await supabase
-          .from("locations")
-          .insert({ user_id: userId, name: label, lat, lng })
-          .select("id")
-          .single();
-        if (!error && inserted?.id) {
-          // 用 DB 回傳的 UUID 替換本地暫時 id
-          setSavedLocations((prev) =>
-            prev.map((loc) => loc.id === localId ? { ...loc, id: inserted.id } : loc)
-          );
-        } else if (error) {
-          console.warn("[locations] INSERT 失敗:", error.message);
-        }
-      } catch (err) {
-        console.warn("[locations] 上傳例外:", err);
+    // user_id 與 device_credentials 一致：直接使用 email prop（非 UUID）
+    try {
+      const { data: inserted, error } = await supabase
+        .from("locations")
+        .insert({ user_id: email, name: label, lat, lng })
+        .select("id")
+        .single();
+      if (!error && inserted?.id) {
+        // 用 DB 回傳的 UUID 替換本地暫時 id
+        setSavedLocations((prev) =>
+          prev.map((loc) => loc.id === localId ? { ...loc, id: inserted.id } : loc)
+        );
+      } else if (error) {
+        console.warn("[locations] INSERT 失敗:", error.message);
       }
-    } else {
-      console.warn("[locations] 無法取得 user_id，跳過上傳");
+    } catch (err) {
+      console.warn("[locations] 上傳例外:", err);
     }
   };
 
@@ -1020,7 +999,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                 </button>
               </div>
             ) : (
-              /* 正常模式：下拉（全寬）+ 齒輪設定 */
+              /* 正常模式：下拉（全寬）+ 連線狀態 + 齒輪設定 */
               <>
                 <div className="relative flex-1 min-w-0">
                   <select
@@ -1036,6 +1015,11 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                     ))}
                   </select>
                   <div className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 text-xs">▾</div>
+                </div>
+                {/* 連線狀態（色點 + 文字） */}
+                <div className="flex items-center gap-1 flex-shrink-0 px-1">
+                  <div className={`w-2 h-2 rounded-full flex-shrink-0 ${statusColor}`} />
+                  <span className="text-xs text-slate-400 whitespace-nowrap hidden sm:inline">{mqttStatus}</span>
                 </div>
                 <button onClick={() => setShowSettingsPanel(true)}
                   className="p-2 rounded-lg bg-blue-500 text-white active:bg-blue-600 flex-shrink-0"
