@@ -140,8 +140,6 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const [selectedDevice, setSelectedDevice] = useState<DeviceCredential | null>(null);
   const [loading, setLoading]               = useState(true);
   const [mqttStatus, setMqttStatus]         = useState("Disconnected");
-  // 設備連線狀態（依 LWT status topic）：null=尚未收到, true=online, false=offline
-  const [deviceOnline, setDeviceOnline]     = useState<boolean | null>(null);
   const [showCredentials, setShowCredentials]   = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [resetting, setResetting]           = useState(false);
@@ -356,57 +354,6 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     );
   }, []); // 只在 mount 時執行一次
 
-  /* ── 登入時上傳定位，之後每分鐘強制更新（positions 保持最新）── */
-  useEffect(() => {
-    if (!navigator.geolocation) return;
-
-    const uploadPosition = async () => {
-      const { data: { user } } = await supabase.auth.getUser();
-      const uid = user?.id;
-      if (!uid) return;
-
-      navigator.geolocation.getCurrentPosition(
-        async (pos) => {
-          const { latitude, longitude, accuracy } = pos.coords;
-          const now = new Date().toISOString();
-          const payload = {
-            lat:         latitude,
-            lng:         longitude,
-            accuracy_m:  accuracy != null ? Math.round(accuracy) : null,
-            source:      "gps",
-            captured_at: now,
-          };
-
-          // 先嘗試 UPDATE
-          const { data: updated, error: updErr } = await supabase
-            .from("positions")
-            .update(payload)
-            .eq("user_id", uid)
-            .select("id");
-
-          if (updErr) {
-            console.warn("[positions] update 失敗:", updErr.message);
-            return;
-          }
-
-          // UPDATE 影響 0 筆 → 該帳號尚無紀錄，改 INSERT
-          if (!updated || updated.length === 0) {
-            const { error: insErr } = await supabase
-              .from("positions")
-              .insert({ user_id: uid, ...payload });
-            if (insErr) console.warn("[positions] insert 失敗:", insErr.message);
-          }
-        },
-        (err) => console.warn("[positions] GPS 失敗:", err.message),
-        { enableHighAccuracy: true, timeout: 10000 }
-      );
-    };
-
-    uploadPosition(); // 登入後立即執行一次
-    const timer = setInterval(uploadPosition, 60 * 1000); // 每 1 分鐘強制更新
-    return () => clearInterval(timer);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
   /* ── Android 返回鍵二次確認 ── */
   useEffect(() => {
     const handleBackButton = () => {
@@ -448,43 +395,17 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     if (!brokerUrl) {
       console.warn(`[MQTT] server_no=${serverNo} 在 mqttList 中找不到對應 URL`);
       setMqttStatus("Disconnected");
-      setDeviceOnline(null);
       return;
     }
 
     let isActive = true;
     setMqttStatus("Connecting...");
-    setDeviceOnline(null); // 切換設備時重置為「尚未收到」
     const client = connectMqtt(brokerUrl, {
       username: mqttUser, password: mqttPass,
       clientId: `web_${Math.random().toString(36).slice(2, 9)}`,
       reconnectPeriod: 3000, keepalive: 30,
     });
-    client.on("connect", () => {
-      if (!isActive) return;
-      setMqttStatus("Connected");
-      // 訂閱設備狀態 topic（含 retained LWT）
-      const statusTopic = `device/${mqttUser}/${selectedDevice?.device_name}/status`;
-      client.subscribe(statusTopic, { qos: 1 }, (err) => {
-        if (err) console.warn("[MQTT] subscribe status failed:", err);
-      });
-    });
-    client.on("message", (topic: string, payload: Buffer) => {
-      if (!isActive) return;
-      const devName = selectedDevice?.device_name;
-      const expectedTopic = `device/${mqttUser}/${devName}/status`;
-      if (topic !== expectedTopic) return;
-      try {
-        const msg = JSON.parse(payload.toString());
-        if (msg?.action === "offline") {
-          setDeviceOnline(false);
-        } else {
-          setDeviceOnline(true);
-        }
-      } catch {
-        setDeviceOnline(true); // 非 JSON → 視為 online
-      }
-    });
+    client.on("connect",   () => { if (isActive) setMqttStatus("Connected"); });
     client.on("error",     () => { if (isActive) setMqttStatus("Error"); });
     client.on("close",     () => { if (isActive) setMqttStatus("Disconnected"); });
     client.on("reconnect", () => { if (isActive) setMqttStatus("Connecting..."); });
@@ -667,12 +588,52 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     setPendingName(`地點 ${savedLocations.length + 1}`);
     setShowNameModal(true);
   };
-  const confirmAddLocation = () => {
+  const confirmAddLocation = async () => {
     if (!pendingLocation) return;
     const label = pendingName.trim() || `地點 ${savedLocations.length + 1}`;
-    const upd = [...savedLocations, { id: Date.now().toString(), label, position: pendingLocation }];
-    setSavedLocations(upd); setActiveLocIdx(upd.length - 1);
-    setPendingLocation(null); setPendingName(""); setShowNameModal(false);
+
+    // 取得目前登入使用者的 user_id（auth session）
+    let userId: string | null = null;
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      userId = sessionData?.session?.user?.id ?? null;
+    } catch { /* 靜默失敗，不影響本地儲存 */ }
+
+    // 產生本地 id，之後若 DB INSERT 成功再用 DB 回傳的 id 替換
+    const localId = Date.now().toString();
+    const newEntry: SavedLocation = { id: localId, label, position: pendingLocation };
+    const upd = [...savedLocations, newEntry];
+    setSavedLocations(upd);
+    setActiveLocIdx(upd.length - 1);
+    setPendingLocation(null);
+    setPendingName("");
+    setShowNameModal(false);
+
+    // 上傳至 Supabase locations 資料表
+    if (userId) {
+      try {
+        const { data: inserted, error } = await supabase
+          .from("locations")
+          .insert({
+            user_id: userId,
+            name: label,
+            lat: pendingLocation[0],
+            lng: pendingLocation[1],
+          })
+          .select("id")
+          .single();
+        if (!error && inserted?.id) {
+          // 用 DB 回傳的 UUID 替換本地 id
+          setSavedLocations((prev) =>
+            prev.map((loc) => loc.id === localId ? { ...loc, id: inserted.id } : loc)
+          );
+        } else if (error) {
+          console.warn("[locations] INSERT 失敗:", error.message);
+        }
+      } catch (err) {
+        console.warn("[locations] 上傳例外:", err);
+      }
+    }
   };
 
   /* ── 刪除設備 ──────────────────────────────────────────────────────────
@@ -961,12 +922,6 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const statusColor = mqttStatus === "Connected" ? "bg-green-500"
     : mqttStatus === "Connecting..." ? "bg-yellow-500 animate-pulse" : "bg-red-500";
 
-  // 設備上線偵測顯示
-  const deviceStatusLabel = deviceOnline === null ? "..." : deviceOnline ? "Connected" : "Disconnected";
-  const deviceStatusColor = deviceOnline === null
-    ? "bg-slate-500"
-    : deviceOnline ? "bg-green-500" : "bg-red-500 animate-pulse";
-
   /* ══════════════════════════════ RENDER ══ */
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-sans select-none">
@@ -1007,7 +962,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           {/* 手機版連線狀態 + 設備名稱同排 */}
           <div className="flex items-center justify-between gap-2 mb-2 md:hidden">
             <div className="flex items-center gap-2 flex-shrink-0">
-              <span className="text-slate-500 text-xs">伺服器</span>
+              <span className="text-slate-500 text-xs">控制面板</span>
               <div className={`w-1.5 h-1.5 rounded-full ${statusColor}`} />
               <span className="text-slate-500 text-xs">{mqttStatus}</span>
             </div>
@@ -1021,7 +976,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           {/* 桌面版分享剩餘（因頂部欄空間有限，在左欄補充顯示）*/}
           {shareRemaining !== null && (
             <div className="hidden md:flex items-center justify-between mb-2 px-1">
-              <span className="text-xs text-slate-500">伺服器</span>
+              <span className="text-xs text-slate-500">設備控制</span>
               <span className={`text-xs px-2 py-0.5 rounded-full border ${
                 shareRemaining > 0 ? "border-slate-600 text-slate-400" : "border-red-500/60 text-red-400"
               }`}>分享剩餘 {shareRemaining}/{MAX_SHARES}</span>
@@ -1060,7 +1015,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                   <select
                     value={selectedDevice?.id ?? ""}
                     onChange={(e) => setSelectedDevice(devices.find((d) => d.id === e.target.value) ?? null)}
-                    className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 appearance-none focus:outline-none focus:border-blue-500 pr-16"
+                    className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 appearance-none focus:outline-none focus:border-blue-500 pr-6"
                   >
                     {devices.length === 0 && <option value="">無設備</option>}
                     {devices.map((d) => (
@@ -1069,14 +1024,6 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                       </option>
                     ))}
                   </select>
-                  {/* 設備連線狀態指示（右側）*/}
-                  <div className="pointer-events-none absolute right-7 top-1/2 -translate-y-1/2 flex items-center gap-1">
-                    <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${deviceStatusColor}`} />
-                    <span className={`text-[10px] font-medium leading-none ${
-                      deviceOnline === null ? "text-slate-500"
-                      : deviceOnline ? "text-green-400" : "text-red-400"
-                    }`}>{deviceStatusLabel}</span>
-                  </div>
                   <div className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 text-xs">▾</div>
                 </div>
                 <button onClick={() => setShowSettingsPanel(true)}
