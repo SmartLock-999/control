@@ -606,11 +606,19 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     setShowNameModal(false);
 
     // 上傳至 Supabase locations 資料表
-    // user_id 與 device_credentials 一致：直接使用 email prop（非 UUID）
+    // locations.user_id 是 UUID 外鍵→auth.users(id)，必須用 getUser() 取得
     try {
+      const { data: userData, error: userErr } = await supabase.auth.getUser();
+      if (userErr || !userData?.user?.id) {
+        console.warn("[locations] 無法取得 auth user id:", userErr?.message);
+        return;
+      }
+      const authUserId = userData.user.id;
+
+      // radius 為 NOT NULL，給預設值 0
       const { data: inserted, error } = await supabase
         .from("locations")
-        .insert({ user_id: email, name: label, lat, lng })
+        .insert({ user_id: authUserId, name: label, lat, lng, radius: 0 })
         .select("id")
         .single();
       if (!error && inserted?.id) {
