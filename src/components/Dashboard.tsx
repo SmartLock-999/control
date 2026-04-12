@@ -10,7 +10,8 @@ import {
   LogOut, Settings, Share2, Trash2, X, MapPin, UserMinus, Users, Pencil,
 } from "lucide-react";
 import { supabase } from "../utils/supabaseClient";
-import { connectMqtt, publishMqtt } from "../utils/mqttClient";
+import { publishMqtt } from "../utils/mqttClient";
+import mqtt from "mqtt";
 
 delete (L.Icon.Default.prototype as any)._getIconUrl;
 L.Icon.Default.mergeOptions({
@@ -139,8 +140,10 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const [devices, setDevices]               = useState<DeviceCredential[]>([]);
   const [selectedDevice, setSelectedDevice] = useState<DeviceCredential | null>(null);
   const [loading, setLoading]               = useState(true);
-  // 每台設備各別維護連線狀態：key = device.id
-  const [mqttStatusMap, setMqttStatusMap]   = useState<Record<string, string>>({});
+  // 伺服器連線狀態：key = server_no
+  const [serverStatusMap, setServerStatusMap] = useState<Record<number, "Online"|"Offline"|"Connecting">>({});
+  // 設備在線狀態：key = device.id（依 retain status topic 判斷）
+  const [deviceOnlineMap, setDeviceOnlineMap] = useState<Record<string, boolean|null>>({});
   const [showCredentials, setShowCredentials]   = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [resetting, setResetting]           = useState(false);
@@ -157,6 +160,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const [pendingLocation, setPendingLocation] = useState<[number, number] | null>(null);
   const [savedLocations, setSavedLocations]   = useState<SavedLocation[]>([]);
   const [activeLocIdx, setActiveLocIdx]       = useState(0);
+  const [locationsLoaded, setLocationsLoaded] = useState(false);
 
   // 設備改名
   const [editingName, setEditingName]   = useState(false);
@@ -339,6 +343,38 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
   useEffect(() => { fetchDevices(); }, [fetchDevices]);
 
+  /* ── 登入後從 locations 資料表讀取已儲存的定位點 ── */
+  useEffect(() => {
+    if (locationsLoaded) return;
+    const load = async () => {
+      try {
+        const { data: userData } = await supabase.auth.getUser();
+        const authUserId = userData?.user?.id;
+        if (!authUserId) return;
+        const { data, error } = await supabase
+          .from("locations")
+          .select("id, name, lat, lng")
+          .eq("user_id", authUserId)
+          .order("name", { ascending: true });
+        if (error) { console.warn("[locations] 讀取失敗:", error.message); return; }
+        const locs: SavedLocation[] = (data ?? [])
+          .filter((r: any) => r.lat != null && r.lng != null)
+          .map((r: any) => ({
+            id: String(r.id),
+            label: r.name ?? "未命名",
+            position: [Number(r.lat), Number(r.lng)] as [number, number],
+          }));
+        if (locs.length) {
+          setSavedLocations(locs);
+          setActiveLocIdx(0);
+        }
+      } catch (err) { console.warn("[locations] 讀取例外:", err); }
+      finally { setLocationsLoaded(true); }
+    };
+    void load();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [locationsLoaded]);
+
   /* ── 開啟頁面自動 GPS 定位 ── */
   useEffect(() => {
     if (!navigator.geolocation) return;
@@ -382,45 +418,95 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /* ── MQTT：每台設備各別建立連線，各別追蹤狀態 ── */
+  /* ── MQTT：伺服器層連線（偵測伺服器是否在線）+ 設備層 retain 訂閱（偵測設備在線）──
+     架構：
+       ① 每個 server_no 建立一條長連線（用 owner 設備憑證），監聽 connect/close 判斷伺服器狀態
+       ② 連上後訂閱所有屬於該伺服器的設備 status topic（retain），即時判斷設備在線
+     優點：
+       ● 伺服器狀態和設備狀態分開顯示
+       ● 不需要輪詢，retain 訊息連上就立刻知道
+  ── */
   useEffect(() => {
-    if (!devices.length || !mqttList) return;
+    if (!devices.length || !Object.keys(mqttList).length) return;
 
-    // 只針對有完整憑證的設備建立連線
-    const validDevices = devices.filter(
-      (d) => d.mqtt_user && d.mqtt_pass && getBrokerUrl(d, mqttList)
-    );
-    if (!validDevices.length) return;
-
-    // 初始化所有設備為 Connecting...
-    setMqttStatusMap((prev) => {
-      const next = { ...prev };
-      validDevices.forEach((d) => { if (!next[d.id]) next[d.id] = "Connecting..."; });
-      return next;
+    // 依 server_no 分組，每個 server_no 只建一條連線
+    const serverGroups: Record<number, DeviceCredential[]> = {};
+    devices.forEach((d) => {
+      if (!d.mqtt_user || !d.mqtt_pass) return;
+      const no = d.server_no != null && d.server_no > 0 ? d.server_no : 1;
+      if (!mqttList[no]) return;
+      if (!serverGroups[no]) serverGroups[no] = [];
+      serverGroups[no].push(d);
     });
 
-    // 為每台設備建立獨立 MQTT 連線，回傳 cleanup 函式陣列
-    const cleanups: (() => void)[] = validDevices.map((d) => {
-      const brokerUrl = getBrokerUrl(d, mqttList)!;
-      const id = d.id;
+    const cleanups: (() => void)[] = [];
+
+    Object.entries(serverGroups).forEach(([noStr, devs]) => {
+      const no = Number(noStr);
+      const brokerUrl = getBrokerUrl(devs[0], mqttList);
+      if (!brokerUrl) return;
+
+      // 用第一台 owner 設備憑證建連線（分享設備用 owner 憑證）
+      const cred = devs.find((d) => !d.share_from) ?? devs[0];
       let isActive = true;
 
-      const setStatus = (s: string) => {
-        if (isActive) setMqttStatusMap((prev) => ({ ...prev, [id]: s }));
-      };
+      setServerStatusMap((prev) => ({ ...prev, [no]: "Connecting" }));
 
-      setStatus("Connecting...");
-      const client = connectMqtt(brokerUrl, {
-        username: d.mqtt_user!, password: d.mqtt_pass!,
-        clientId: `web_${id.slice(0, 6)}_${Math.random().toString(36).slice(2, 6)}`,
-        reconnectPeriod: 3000, keepalive: 30,
+      const client = mqtt.connect(brokerUrl, {
+        username: cred.mqtt_user!,
+        password: cred.mqtt_pass!,
+        clientId: `web_srv${no}_${Math.random().toString(36).slice(2, 8)}`,
+        reconnectPeriod: 5000,
+        keepalive: 30,
+        clean: true,
       });
-      client.on("connect",   () => setStatus("Connected"));
-      client.on("error",     () => setStatus("Error"));
-      client.on("close",     () => setStatus("Disconnected"));
-      client.on("reconnect", () => setStatus("Connecting..."));
 
-      return () => { isActive = false; try { client.end(true); } catch {} };
+      client.on("connect", () => {
+        if (!isActive) return;
+        setServerStatusMap((prev) => ({ ...prev, [no]: "Online" }));
+
+        // 訂閱該伺服器上所有設備的 status topic
+        const topics = devs
+          .filter((d) => d.mqtt_user && d.device_name)
+          .map((d) => `device/${d.mqtt_user}/${d.device_name}/status`);
+        if (topics.length) client.subscribe(topics, { qos: 0 });
+      });
+
+      client.on("message", (topic, payload) => {
+        if (!isActive) return;
+        const text = new TextDecoder().decode(payload).trim();
+        let action = text;
+        try { action = (JSON.parse(text) as any)?.action ?? text; } catch {}
+        const online = action.toLowerCase() !== "offline" && action.toLowerCase() !== "disconnected";
+
+        // 比對 topic → device.id
+        devs.forEach((d) => {
+          if (!d.mqtt_user || !d.device_name) return;
+          if (topic === `device/${d.mqtt_user}/${d.device_name}/status`) {
+            setDeviceOnlineMap((prev) => ({ ...prev, [d.id]: online }));
+          }
+        });
+      });
+
+      client.on("error", () => {
+        if (!isActive) return;
+        // error 不代表伺服器離線（可能只是 auth 問題），維持 Connecting
+      });
+
+      client.on("close", () => {
+        if (!isActive) return;
+        setServerStatusMap((prev) => ({ ...prev, [no]: "Offline" }));
+      });
+
+      client.on("reconnect", () => {
+        if (!isActive) return;
+        setServerStatusMap((prev) => ({ ...prev, [no]: "Connecting" }));
+      });
+
+      cleanups.push(() => {
+        isActive = false;
+        try { client.end(true); } catch {}
+      });
     });
 
     return () => { cleanups.forEach((fn) => fn()); };
@@ -931,9 +1017,23 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     </div>
   );
 
-  const mqttStatus = (selectedDevice ? mqttStatusMap[selectedDevice.id] : null) ?? "Disconnected";
-  const statusColor = mqttStatus === "Connected" ? "bg-green-500"
-    : mqttStatus === "Connecting..." ? "bg-yellow-500 animate-pulse" : "bg-red-500";
+  // 選定設備的伺服器狀態
+  const selServerNo = selectedDevice
+    ? (selectedDevice.server_no != null && selectedDevice.server_no > 0 ? selectedDevice.server_no : 1)
+    : null;
+  const selServerStatus = selServerNo != null ? (serverStatusMap[selServerNo] ?? "Connecting") : "Offline";
+  // 選定設備的在線狀態（null = 尚未收到 retain 訊息）
+  const selDeviceOnline = selectedDevice ? (deviceOnlineMap[selectedDevice.id] ?? null) : null;
+
+  // 顏色輔助
+  const serverColor = selServerStatus === "Online"
+    ? "bg-green-500"
+    : selServerStatus === "Connecting" ? "bg-yellow-400 animate-pulse" : "bg-red-500";
+  const deviceColor = selDeviceOnline === true
+    ? "bg-green-500"
+    : selDeviceOnline === false ? "bg-red-500" : "bg-slate-500 animate-pulse";
+  const serverLabel = selServerStatus === "Online" ? "線上" : selServerStatus === "Connecting" ? "連線中" : "離線";
+  const deviceLabel = selDeviceOnline === true ? "在線" : selDeviceOnline === false ? "離線" : "偵測中";
 
   /* ══════════════════════════════ RENDER ══ */
   return (
@@ -943,9 +1043,14 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       <div className="bg-slate-900 border-b border-slate-800 px-4 py-2 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <h1 className="text-base font-bold tracking-tight">Smart Lock</h1>
-          <div className="hidden md:flex items-center gap-1.5">
-            <div className={`w-1.5 h-1.5 rounded-full ${statusColor}`} />
-            <span className="text-slate-500 text-xs">{mqttStatus}</span>
+          <div className="hidden md:flex items-center gap-2">
+            <span className="text-slate-600 text-xs">伺服器</span>
+            <div className={`w-1.5 h-1.5 rounded-full ${serverColor}`} />
+            <span className="text-slate-500 text-xs">{serverLabel}</span>
+            <span className="text-slate-700 text-xs">｜</span>
+            <span className="text-slate-600 text-xs">設備</span>
+            <div className={`w-1.5 h-1.5 rounded-full ${deviceColor}`} />
+            <span className="text-slate-500 text-xs">{deviceLabel}</span>
           </div>
         </div>
         <div className="flex items-center gap-3">
@@ -974,10 +1079,14 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
           {/* 手機版連線狀態 + 設備名稱同排 */}
           <div className="flex items-center justify-between gap-2 mb-2 md:hidden">
-            <div className="flex items-center gap-2 flex-shrink-0">
-              <span className="text-slate-500 text-xs">控制面板</span>
-              <div className={`w-1.5 h-1.5 rounded-full ${statusColor}`} />
-              <span className="text-slate-500 text-xs">{mqttStatus}</span>
+            <div className="flex items-center gap-1.5 flex-shrink-0">
+              <span className="text-slate-600 text-xs">伺服器</span>
+              <div className={`w-1.5 h-1.5 rounded-full ${serverColor}`} />
+              <span className="text-slate-500 text-xs">{serverLabel}</span>
+              <span className="text-slate-700 text-xs mx-0.5">｜</span>
+              <span className="text-slate-600 text-xs">設備</span>
+              <div className={`w-1.5 h-1.5 rounded-full ${deviceColor}`} />
+              <span className="text-slate-500 text-xs">{deviceLabel}</span>
             </div>
             {selectedDevice && (
               <span className="text-sm font-semibold text-slate-200 truncate text-right">
@@ -1039,10 +1148,10 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                   </select>
                   <div className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 text-xs">▾</div>
                 </div>
-                {/* 連線狀態（色點 + 文字） */}
-                <div className="flex items-center gap-1 flex-shrink-0 px-1">
-                  <div className={`w-2 h-2 rounded-full flex-shrink-0 ${statusColor}`} />
-                  <span className="text-xs text-slate-400 whitespace-nowrap hidden sm:inline">{mqttStatus}</span>
+                {/* 連線狀態（伺服器 + 設備） */}
+                <div className="flex items-center gap-1 flex-shrink-0">
+                  <div className={`w-2 h-2 rounded-full flex-shrink-0 ${serverColor}`} title={`伺服器：${serverLabel}`} />
+                  <div className={`w-2 h-2 rounded-full flex-shrink-0 ${deviceColor}`} title={`設備：${deviceLabel}`} />
                 </div>
                 <button onClick={() => setShowSettingsPanel(true)}
                   className="p-2 rounded-lg bg-blue-500 text-white active:bg-blue-600 flex-shrink-0"
@@ -1139,10 +1248,17 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                   <span className="text-slate-300 font-mono">{selectedDevice.mqtt_pass || "未設定"}</span>
                 </div>
                 <div className="flex justify-between items-center text-xs">
-                  <span className="text-slate-500">連線狀態</span>
+                  <span className="text-slate-500">伺服器</span>
                   <span className="flex items-center gap-1">
-                    <div className={`w-1.5 h-1.5 rounded-full ${statusColor}`} />
-                    <span className="text-slate-300">{mqttStatus}</span>
+                    <div className={`w-1.5 h-1.5 rounded-full ${serverColor}`} />
+                    <span className="text-slate-300">{serverLabel}</span>
+                  </span>
+                </div>
+                <div className="flex justify-between items-center text-xs">
+                  <span className="text-slate-500">設備</span>
+                  <span className="flex items-center gap-1">
+                    <div className={`w-1.5 h-1.5 rounded-full ${deviceColor}`} />
+                    <span className="text-slate-300">{deviceLabel}</span>
                   </span>
                 </div>
                 {selectedDevice.share_from && (
