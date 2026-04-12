@@ -375,6 +375,45 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [locationsLoaded]);
 
+  /* ── 登入後自動上傳 GPS 定位點至 positions，之後每 3 分鐘重複 ── */
+  useEffect(() => {
+    if (!navigator.geolocation) return;
+
+    const uploadPosition = async (pos: GeolocationPosition) => {
+      try {
+        const { data: userData } = await supabase.auth.getUser();
+        const authUserId = userData?.user?.id;
+        if (!authUserId) return;
+        const lat = pos.coords.latitude;
+        const lng = pos.coords.longitude;
+        const accuracy_m = pos.coords.accuracy ?? null;
+        await supabase.from("positions").insert({
+          user_id: authUserId,
+          lat,
+          lng,
+          accuracy_m,
+          captured_at: new Date().toISOString(),
+        });
+      } catch (err) {
+        console.warn("[positions] 上傳失敗:", err);
+      }
+    };
+
+    const doUpload = () => {
+      navigator.geolocation.getCurrentPosition(
+        uploadPosition,
+        (err) => console.warn("[positions] 取得位置失敗:", err.message),
+        { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+      );
+    };
+
+    // 立即上傳一次
+    doUpload();
+    // 每 3 分鐘重複
+    const timer = window.setInterval(doUpload, 3 * 60 * 1000);
+    return () => window.clearInterval(timer);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   /* ── 開啟頁面自動 GPS 定位 ── */
   useEffect(() => {
     if (!navigator.geolocation) return;
@@ -1148,11 +1187,6 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                   </select>
                   <div className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 text-xs">▾</div>
                 </div>
-                {/* 連線狀態（伺服器 + 設備） */}
-                <div className="flex items-center gap-1 flex-shrink-0">
-                  <div className={`w-2 h-2 rounded-full flex-shrink-0 ${serverColor}`} title={`伺服器：${serverLabel}`} />
-                  <div className={`w-2 h-2 rounded-full flex-shrink-0 ${deviceColor}`} title={`設備：${deviceLabel}`} />
-                </div>
                 <button onClick={() => setShowSettingsPanel(true)}
                   className="p-2 rounded-lg bg-blue-500 text-white active:bg-blue-600 flex-shrink-0"
                   title="設定">
@@ -1403,10 +1437,21 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                     </div>
                     <div className="flex gap-3 ml-2 flex-shrink-0">
                       <button onClick={() => { setActiveLocIdx(idx); setFlyTarget(loc.position); }} className="text-blue-400">前往</button>
-                      <button onClick={() => {
+                      <button onClick={async () => {
+                        // 先從本地移除（UI 即時）
                         const upd = savedLocations.filter((_, i) => i !== idx);
                         setSavedLocations(upd);
                         setActiveLocIdx(Math.min(activeLocIdx, Math.max(0, upd.length - 1)));
+                        // 同步刪除 DB（loc.id 是 DB UUID）
+                        try {
+                          const { error } = await supabase
+                            .from("locations")
+                            .delete()
+                            .eq("id", loc.id);
+                          if (error) console.warn("[locations] 刪除失敗:", error.message);
+                        } catch (err) {
+                          console.warn("[locations] 刪除例外:", err);
+                        }
                       }} className="text-red-400">刪除</button>
                     </div>
                   </div>
