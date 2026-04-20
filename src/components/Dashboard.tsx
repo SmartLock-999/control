@@ -262,7 +262,6 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     selectedDeviceRef.current = device;
     try {
       if (device?.id) localStorage.setItem(lastSelectedDeviceKey(email), device.id);
-      else localStorage.removeItem(lastSelectedDeviceKey(email));
     } catch {}
     setSelectedDevice(device);
   }, [email, lastSelectedDeviceKey]);
@@ -420,7 +419,6 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     const id = selectedDevice?.id;
     try {
       if (id) localStorage.setItem(lastSelectedDeviceKey(email), id);
-      else localStorage.removeItem(lastSelectedDeviceKey(email));
     } catch {}
   }, [email, lastSelectedDeviceKey, selectedDevice?.id]);
 
