@@ -229,14 +229,8 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const mqttClientsRef = React.useRef<Record<number, mqtt.MqttClient>>({});
 
   // ── 定時觸發 state ──
-  // timerConfigs 依設備獨立，key 格式：btnTimers_{deviceId}
-  const timerStorageKey = useCallback((dev: DeviceCredential | null) =>
-    dev ? `btnTimers_${dev.id}` : "btnTimers_nodev"
-  , []);
-
   const [timerConfigs, setTimerConfigs] = useState<Record<string, TimerCfg>>(() => {
-    // 初始載入：等待 selectedDevice 確定後由 useEffect 重載，先給空物件
-    return {};
+    try { return JSON.parse(localStorage.getItem("btnTimers") || "{}"); } catch { return {}; }
   });
   const [periodicCountdowns, setPeriodicCountdowns] = useState<Record<string, number>>({});
   const [showBtnMenu, setShowBtnMenu]               = useState<string | null>(null);
@@ -256,8 +250,6 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const selectedDeviceRef = React.useRef<DeviceCredential | null>(null);
   const mqttListRef       = React.useRef<Record<number, string>>({});
   const btnLabelsRef      = React.useRef<Record<string, string>>({});
-  // fireActionViaRef 的 ref wrapper，讓 startPeriodicForAction 不需依賴 fireActionViaRef
-  const fireActionRef = React.useRef<(action: string) => void>(() => {});
 
   const isOwnDevice    = !!(selectedDevice && !selectedDevice.share_from);
   // count 本身就代表剩餘次數（每次分享 -1）
@@ -395,56 +387,41 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   useEffect(() => { mqttListRef.current = mqttList; },           [mqttList]);
   useEffect(() => { btnLabelsRef.current = btnLabels; },         [btnLabels]);
 
-  // ── 單一 action 的計時器啟動 / 停止（不影響其他 action）──
-  const startPeriodicForAction = useCallback((action: string, intervalSec: number) => {
-    // 只清除此 action，不動其他
-    clearInterval(periodicRefs.current[action]);
-    clearInterval(periodicCdRefs.current[action]);
-    let cd = intervalSec;
-    setPeriodicCountdowns(prev => ({ ...prev, [action]: cd }));
-    periodicCdRefs.current[action] = setInterval(() => {
-      cd = cd > 1 ? cd - 1 : intervalSec;
-      setPeriodicCountdowns(prev => ({ ...prev, [action]: cd }));
-    }, 1000);
-    periodicRefs.current[action] = setInterval(() => {
-      cd = intervalSec;
-      fireActionRef.current(action);
-    }, intervalSec * 1000);
-  }, []);
-
-  const stopPeriodicForAction = useCallback((action: string) => {
-    clearInterval(periodicRefs.current[action]);
-    clearInterval(periodicCdRefs.current[action]);
-    delete periodicRefs.current[action];
-    delete periodicCdRefs.current[action];
-    setPeriodicCountdowns(prev => { const n = { ...prev }; delete n[action]; return n; });
-  }, []);
-
-  const stopAllPeriodics = useCallback(() => {
-    Object.keys(periodicRefs.current).forEach(a => {
-      clearInterval(periodicRefs.current[a]);
-      clearInterval(periodicCdRefs.current[a]);
-    });
+  /* ── 定期觸發：timerConfigs 改變時重建所有 periodic interval ── */
+  useEffect(() => {
+    // 先清除全部舊的
+    Object.values(periodicRefs.current).forEach(clearInterval);
+    Object.values(periodicCdRefs.current).forEach(clearInterval);
     periodicRefs.current   = {};
     periodicCdRefs.current = {};
-    setPeriodicCountdowns({});
-  }, []);
 
-  /* ── selectedDevice 切換時：重載該設備的計時器設定 ── */
-  useEffect(() => {
-    stopAllPeriodics();
-    const key = timerStorageKey(selectedDevice);
-    let configs: Record<string, TimerCfg> = {};
-    try { configs = JSON.parse(localStorage.getItem(key) || "{}"); } catch {}
-    setTimerConfigs(configs);
-    // 啟動此設備已設定的 periodic
-    Object.entries(configs).forEach(([action, cfg]) => {
-      if (cfg.active && cfg.mode === "periodic" && (cfg.intervalSec ?? 0) >= 60) {
-        startPeriodicForAction(action, cfg.intervalSec!);
-      }
+    const initCountdowns: Record<string, number> = {};
+
+    Object.entries(timerConfigs).forEach(([action, cfg]) => {
+      if (!cfg.active || cfg.mode !== "periodic") return;
+      let cd = cfg.intervalSec;
+      initCountdowns[action] = cd;
+
+      // 倒數顯示（每秒 -1）
+      periodicCdRefs.current[action] = setInterval(() => {
+        cd = cd > 1 ? cd - 1 : cfg.intervalSec;
+        setPeriodicCountdowns(prev => ({ ...prev, [action]: cd }));
+      }, 1000);
+
+      // 主觸發
+      periodicRefs.current[action] = setInterval(() => {
+        cd = cfg.intervalSec; // 倒數歸位（倒數 interval 下次重置）
+        fireActionViaRef(action);
+      }, cfg.intervalSec * 1000);
     });
+
+    setPeriodicCountdowns(initCountdowns);
+    return () => {
+      Object.values(periodicRefs.current).forEach(clearInterval);
+      Object.values(periodicCdRefs.current).forEach(clearInterval);
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedDevice?.id]);
+  }, [timerConfigs]);
 
   /* ── 登入後從 locations 資料表讀取已儲存的定位點 ── */
   useEffect(() => {
@@ -610,92 +587,21 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         if (!isActive) return;
         setServerStatusMap((prev) => ({ ...prev, [no]: "Online" }));
 
+        // 訂閱該伺服器上所有設備的 status topic
         const topics = devs
           .filter((d) => d.mqtt_user && d.device_name)
           .map((d) => `device/${d.mqtt_user}/${d.device_name}/status`);
         if (topics.length) client.subscribe(topics, { qos: 0 });
-
-        // 連線後查詢 ESP32 目前的循環 + 排程設定（只查 owner 設備）
-        setTimeout(() => {
-          devs.filter(d => d.mqtt_user && d.device_name && !d.share_from).forEach(d => {
-            const cfgTopic = `device/${d.mqtt_user}/${d.device_name}/config`;
-            client.publish(cfgTopic, JSON.stringify({ action: "get_periodic" }), { qos: 1 });
-            client.publish(cfgTopic, JSON.stringify({ action: "get_schedule" }), { qos: 1 });
-          });
-        }, 1500);
       });
 
       client.on("message", (topic, payload) => {
         if (!isActive) return;
         const text = new TextDecoder().decode(payload).trim();
-        let parsed: any = null;
-        try { parsed = JSON.parse(text); } catch {}
+        let action = text;
+        try { action = (JSON.parse(text) as any)?.action ?? text; } catch {}
+        const online = action.toLowerCase() !== "offline" && action.toLowerCase() !== "disconnected";
 
-        // ── ESP32 回報循環設定（periodic_cfg）→ 同步 state + localStorage ──
-        if (parsed?.type === "periodic_cfg" && Array.isArray(parsed.periodics)) {
-          // 找到對應這個 topic 的設備
-          const dev = devs.find(d =>
-            topic === `device/${d.mqtt_user}/${d.device_name}/status` ||
-            topic.startsWith(`device/${d.mqtt_user}/${d.device_name}/`)
-          );
-          if (dev) {
-            const storageKey = `btnTimers_${dev.id}`;
-            let stored: Record<string, TimerCfg> = {};
-            try { stored = JSON.parse(localStorage.getItem(storageKey) || "{}"); } catch {}
-            (parsed.periodics as any[]).forEach((p: any) => {
-              const a: string = p.target;
-              if (p.active && p.intervalSec >= 60) {
-                stored[a] = { mode: "periodic", intervalSec: p.intervalSec, active: true };
-              } else {
-                if (stored[a]?.mode === "periodic") delete stored[a];
-              }
-            });
-            try { localStorage.setItem(storageKey, JSON.stringify(stored)); } catch {}
-            // 只有當前選中設備才更新 state
-            if (dev.id === selectedDeviceRef.current?.id) {
-              setTimerConfigs({ ...stored });
-            }
-          }
-          return;
-        }
-
-        // ── ESP32 回報排程設定（schedule_cfg）→ 同步 state + localStorage ──
-        if (parsed?.type === "schedule_cfg" && Array.isArray(parsed.schedules)) {
-          const dev = devs.find(d =>
-            topic.startsWith(`device/${d.mqtt_user}/${d.device_name}/`)
-          );
-          if (dev) {
-            const storageKey = `btnTimers_${dev.id}`;
-            let stored: Record<string, TimerCfg> = {};
-            try { stored = JSON.parse(localStorage.getItem(storageKey) || "{}"); } catch {}
-            (parsed.schedules as any[]).forEach((s: any) => {
-              const a: string = s.target;
-              if (s.active) {
-                stored[a] = {
-                  mode: "schedule", active: true,
-                  schedule: {
-                    type:     s.stype === 1 || s.stype === "date" ? "date" : "weekday",
-                    weekMask: s.weekMask,
-                    dates:    typeof s.dates === "string" ? s.dates.split(",").filter(Boolean) : (s.dates ?? []),
-                    hour: s.hour, minute: s.minute,
-                  },
-                };
-              } else {
-                if (stored[a]?.mode === "schedule") delete stored[a];
-              }
-            });
-            try { localStorage.setItem(storageKey, JSON.stringify(stored)); } catch {}
-            if (dev.id === selectedDeviceRef.current?.id) {
-              setTimerConfigs({ ...stored });
-            }
-          }
-          return;
-        }
-
-        // ── 設備在線狀態 ──
-        const action = parsed?.action ?? text;
-        const online = String(action).toLowerCase() !== "offline"
-                    && String(action).toLowerCase() !== "disconnected";
+        // 比對 topic → device.id
         devs.forEach((d) => {
           if (!d.mqtt_user || !d.device_name) return;
           if (topic === `device/${d.mqtt_user}/${d.device_name}/status`) {
@@ -773,16 +679,13 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     setTimeout(() => setToastMsg(null), 2500);
   }, []);
 
-  // 同步 fireActionRef，讓 setInterval callback 永遠呼叫到最新版本
-  useEffect(() => { fireActionRef.current = fireActionViaRef; }, [fireActionViaRef]);
-
   /* ── 按鈕點擊：periodic/schedule 模式下直接手動觸發，其餘由 ESP32 排程執行 ── */
   const handleBtnClick = useCallback((action: string) => {
     handleControl(action);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /* ── 送設定到 ESP32 config topic（periodic / schedule 兩路分開）── */
+  /* ── 送排程設定到 ESP32 config topic ── */
   const sendScheduleToDevice = useCallback((action: string, cfg: TimerCfg | null) => {
     const dev  = selectedDeviceRef.current;
     const list = mqttListRef.current;
@@ -794,62 +697,63 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     if (!client?.connected) return;
     const cfgTopic = `device/${dev.mqtt_user}/${dev.device_name}/config`;
 
-    if (!cfg || !cfg.active) {
-      client.publish(cfgTopic, JSON.stringify({ action: "set_periodic", target: action, active: false }), { qos: 1 });
-      setTimeout(() => client.publish(cfgTopic, JSON.stringify({ action: "set_schedule", target: action, active: false }), { qos: 1 }), 200);
+    if (!cfg || !cfg.active || cfg.mode !== "schedule") {
+      // 停用排程
+      client.publish(cfgTopic,
+        JSON.stringify({ action: "set_schedule", target: action, active: false }),
+        { qos: 1 });
       return;
     }
-    if (cfg.mode === "periodic") {
-      const intervalSec = Math.max(60, cfg.intervalSec ?? 60);
-      client.publish(cfgTopic, JSON.stringify({ action: "set_periodic", target: action, active: true, intervalSec }), { qos: 1 });
-      setTimeout(() => client.publish(cfgTopic, JSON.stringify({ action: "set_schedule", target: action, active: false }), { qos: 1 }), 200);
-      return;
+    const s = cfg.schedule!;
+    const mask = s.weekMask ?? (s.weekMask === 0 ? 0
+      : (s.dates ? 0 : 31)); // fallback Mon-Fri
+    const payload: Record<string, unknown> = {
+      action:  "set_schedule",
+      target:  action,
+      active:  true,
+      stype:   s.type,
+      hour:    s.hour,
+      minute:  s.minute,
+    };
+    if (s.type === "weekday") {
+      payload.weekMask = s.weekMask ?? 31;
+    } else {
+      payload.dates = (s.dates ?? []).join(",");
     }
-    if (cfg.mode === "schedule" && cfg.schedule) {
-      const s = cfg.schedule;
-      const payload: Record<string, unknown> = { action: "set_schedule", target: action, active: true, stype: s.type, hour: s.hour, minute: s.minute };
-      if (s.type === "weekday") { payload.weekMask = s.weekMask ?? 31; }
-      else                      { payload.dates    = (s.dates ?? []).join(","); }
-      client.publish(cfgTopic, JSON.stringify(payload), { qos: 1 });
-      setTimeout(() => client.publish(cfgTopic, JSON.stringify({ action: "set_periodic", target: action, active: false }), { qos: 1 }), 200);
-    }
+    client.publish(cfgTopic, JSON.stringify(payload), { qos: 1 });
+    console.log("[Schedule] sent to", cfgTopic, payload);
   }, []);
 
-  /* ── 存定時設定（localStorage 設備專屬 + 精準管理此 action 計時器）── */
-  const saveTimerConfig = useCallback((action: string, cfg: TimerCfg | null) => {
-    const key = timerStorageKey(selectedDeviceRef.current);
+  /* ── 存定時設定（localStorage + MQTT）── */
+  const saveTimerConfig = (action: string, cfg: TimerCfg | null) => {
     setTimerConfigs(prev => {
       const updated = { ...prev };
       if (cfg === null) { delete updated[action]; } else { updated[action] = cfg; }
-      try { localStorage.setItem(key, JSON.stringify(updated)); } catch {}
+      try { localStorage.setItem("btnTimers", JSON.stringify(updated)); } catch {}
       return updated;
     });
-    // 只操作此 action 的計時器，不影響其他 action
-    if (cfg?.active && cfg.mode === "periodic" && (cfg.intervalSec ?? 0) >= 60) {
-      startPeriodicForAction(action, cfg.intervalSec!);
-    } else {
-      stopPeriodicForAction(action);
-    }
     sendScheduleToDevice(action, cfg);
-  }, [timerStorageKey, startPeriodicForAction, stopPeriodicForAction, sendScheduleToDevice]);
+  };
 
   /* ── 控制 ── */
-  const handleControl = (action: string) => {
-    if (!selectedDevice?.mqtt_user || !selectedDevice?.device_name) { alert("請先選擇設備"); return; }
-    const brokerUrl = getBrokerUrl(selectedDevice, mqttList);
+  const handleControl = useCallback((action: string) => {
+    // 使用 ref 讀取最新 selectedDevice，避免 useCallback stale closure 問題
+    const device = selectedDeviceRef.current;
+    const list   = mqttListRef.current;
+    if (!device?.mqtt_user || !device?.device_name) { alert("請先選擇設備"); return; }
+    const brokerUrl = getBrokerUrl(device, list);
     if (!brokerUrl) {
-      alert(`設備「${displayName(selectedDevice)}」的伺服器（server_no=${selectedDevice.server_no ?? 1}）URL 未設定，請確認 mqtt_servers 資料表`);
+      alert(`設備「${displayName(device)}」的伺服器（server_no=${device.server_no ?? 1}）URL 未設定，請確認 mqtt_servers 資料表`);
       return;
     }
-    const no = (selectedDevice.server_no != null && selectedDevice.server_no > 0)
-      ? selectedDevice.server_no : 1;
+    const no = (device.server_no != null && device.server_no > 0) ? device.server_no : 1;
     const client = mqttClientsRef.current[no];
     if (!client || !client.connected) {
       alert("伺服器尚未連線，請稍候再試");
       return;
     }
     const pin = action === "open" ? "D4" : action === "stop" ? "D18" : "D19";
-    const topic = `device/${selectedDevice.mqtt_user}/${selectedDevice.device_name}/command`;
+    const topic = `device/${device.mqtt_user}/${device.device_name}/command`;
     const payload = JSON.stringify({ action, pin, ts: Math.floor(Date.now() / 1000) });
     client.publish(topic, payload, { qos: 1 });
     // 按壓動畫
@@ -859,10 +763,11 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     if (navigator.vibrate) navigator.vibrate([40, 30, 40]);
     // Toast 提示
     const defaultLabels: Record<string, string> = { open: "開", stop: "停", down: "關" };
-    const label = btnLabels[action] || defaultLabels[action] || action;
+    const label = btnLabelsRef.current[action] || defaultLabels[action] || action;
     setToastMsg(`已觸發「${label}」`);
     setTimeout(() => setToastMsg(null), 2500);
-  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /* ── 按鈕長按 → 打開選單 ── */
   const handleBtnLongPress = (action: string) => {
@@ -2226,6 +2131,8 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         const btnLabel = btnLabels[action] || defaultLabels[action] || action;
         const cfg = timerConfigs[action];
         const hasCfg = cfg?.active;
+        // 分享來的設備不允許設定定時觸發（無法寫入 ESP32 config topic）
+        const isSharedDevice = !!(selectedDevice?.share_from);
         const modeLabel = cfg?.mode === "schedule" ? "排程觸發" : "定期觸發";
         const fmtSec = (s: number) =>
           s >= 3600 ? `${Math.floor(s/3600)}h${Math.floor((s%3600)/60)}m`
@@ -2266,7 +2173,8 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                       <p className="text-xs text-slate-500">目前：{btnLabel}</p>
                     </div>
                   </button>
-                  {/* 定時設定 */}
+                  {/* 定時設定（分享設備不顯示）*/}
+                  {!isSharedDevice && (
                   <button onClick={() => {
                     // 初始化 modal 編輯狀態
                     setEditTimerMode(cfg?.mode ?? "periodic");
@@ -2302,8 +2210,9 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                       <span className="text-[10px] bg-yellow-400/20 border border-yellow-400/40 text-yellow-300 px-1.5 py-0.5 rounded-full">ON</span>
                     )}
                   </button>
-                  {/* 快速停用（已啟用時顯示）*/}
-                  {hasCfg && (
+                  )}
+                  {/* 快速停用（已啟用 且 非分享設備 時顯示）*/}
+                  {hasCfg && !isSharedDevice && (
                     <button onClick={() => { saveTimerConfig(action, null); setShowBtnMenu(null); }}
                       className="w-full flex items-center gap-3 px-4 py-3 bg-slate-800 border border-red-500/30 rounded-xl active:bg-red-500/10 text-left">
                       <X className="w-4 h-4 text-red-400 flex-shrink-0" />
@@ -2518,12 +2427,6 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                       </span>
                     </div>
 
-                    <div className="bg-indigo-500/10 border border-indigo-500/20 rounded-xl px-3 py-2 mb-4">
-                      <p className="text-[11px] text-indigo-300">
-                        📡 排程設定將透過 MQTT 傳送至 ESP32 並存入 NVS。
-                        App 關閉後，ESP32 仍會在設定時間自動觸發繼電器。
-                      </p>
-                    </div>
                   </>
                 )}
 
