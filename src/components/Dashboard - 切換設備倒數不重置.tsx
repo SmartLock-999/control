@@ -94,7 +94,6 @@ interface SchedDef {
 interface TimerCfg {
   mode: "periodic" | "schedule";
   intervalSec?: number;   // periodic 用，最短 60 秒
-  periodicStartedAt?: number; // periodic 開始時間（ms）
   schedule?: SchedDef;    // schedule 用（送到 ESP32）
   active: boolean;
 }
@@ -740,12 +739,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
             (parsed.periodics as any[]).forEach((p: any) => {
               const a: string = p.target;
               if (p.active && p.intervalSec >= 60) {
-                stored[a] = {
-                  mode: "periodic",
-                  intervalSec: p.intervalSec,
-                  periodicStartedAt: stored[a]?.mode === "periodic" ? stored[a].periodicStartedAt : Date.now(),
-                  active: true,
-                };
+                stored[a] = { mode: "periodic", intervalSec: p.intervalSec, active: true };
               } else {
                 if (stored[a]?.mode === "periodic") delete stored[a];
               }
@@ -969,14 +963,6 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     try { localStorage.setItem(btnLabelStorageKey(dev), JSON.stringify(updated)); } catch {}
     setEditingBtn(null);
   };
-
-  const formatClockTime = (ts: number) =>
-    new Date(ts).toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit", hour12: false });
-
-  const formatIntervalLabel = (sec: number) =>
-    sec >= 3600 ? `${Math.floor(sec / 3600)}h${Math.floor((sec % 3600) / 60)}m`
-    : sec >= 60 ? `${Math.floor(sec / 60)}m${sec % 60 > 0 ? `${sec % 60}s` : ""}`
-    : `${sec}s`;
 
   /* ── 手動 GPS ── */
   const handleLocate = () => {
@@ -1582,16 +1568,14 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                 const cfg         = timerConfigs[action];
                 const hasPeriodic = cfg?.active && cfg.mode === "periodic";
                 const hasSchedule = cfg?.active && cfg.mode === "schedule";
+                const pCd         = periodicCountdowns[runtimeKey];
 
                 const fontSize = label.length <= 2 ? "1.1rem"
                                : label.length <= 4 ? "0.88rem"
                                : label.length <= 6 ? "0.74rem" : "0.64rem";
 
-                const progress = (hasPeriodic && cfg?.intervalSec && periodicCountdowns[runtimeKey] != null)
-                  ? ((cfg.intervalSec - periodicCountdowns[runtimeKey]) / cfg.intervalSec) * 100 : 0;
-                const periodicSubLabel = hasPeriodic && cfg?.intervalSec
-                  ? `${formatClockTime(cfg.periodicStartedAt ?? Date.now())} / ${formatIntervalLabel(cfg.intervalSec)}`
-                  : null;
+                const progress = (hasPeriodic && cfg?.intervalSec && pCd != null)
+                  ? ((cfg.intervalSec - pCd) / cfg.intervalSec) * 100 : 0;
 
                 // 排程副文字：顯示 HH:MM
                 const schedSubLabel = hasSchedule && cfg?.schedule
@@ -1643,7 +1627,9 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                       {/* 副文字 */}
                       {!isPressed && (hasPeriodic || hasSchedule) && (
                         <span className="text-[9px] font-mono opacity-60 leading-none mt-0.5">
-                          {hasPeriodic ? (periodicSubLabel ?? "") : schedSubLabel ?? ""}
+                          {hasPeriodic
+                            ? (pCd != null ? (pCd >= 60 ? `${Math.floor(pCd/60)}m${pCd%60}s` : `${pCd}s`) : "")
+                            : schedSubLabel ?? ""}
                         </span>
                       )}
                     </button>
@@ -2322,6 +2308,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         const cfg = timerConfigs[action];
         const hasCfg = cfg?.active;
         const isSharedDevice = !!selectedDevice?.share_from;
+        const modeLabel = cfg?.mode === "schedule" ? "排程觸發" : "定期觸發";
         const fmtSec = (s: number) =>
           s >= 3600 ? `${Math.floor(s/3600)}h${Math.floor((s%3600)/60)}m`
                     : s >= 60   ? `${Math.floor(s/60)}m${s%60 > 0 ? `${s%60}s` : ""}` : `${s}s`;
@@ -2361,45 +2348,55 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                       <p className="text-xs text-slate-500">目前：{btnLabel}</p>
                     </div>
                   </button>
-                  {!isSharedDevice && (
-                    <button
-                      onClick={() => {
-                        setEditTimerMode(cfg?.mode ?? "periodic");
-                        setEditTimerSec(cfg?.intervalSec ?? 60);
-                        if (cfg?.mode === "schedule" && cfg.schedule) {
-                          setEditSchedType(cfg.schedule.type);
-                          setEditSchedHour(cfg.schedule.hour);
-                          setEditSchedMin(cfg.schedule.minute);
-                          if (cfg.schedule.type === "weekday") {
-                            const mask = cfg.schedule.weekMask ?? 31;
-                            setEditSchedDays([1,2,3,4,5,6,7].filter(d => mask & (1<<(d-1))));
-                            setEditSchedDates([]);
-                          } else {
-                            setEditSchedDays([]);
-                            setEditSchedDates(cfg.schedule.dates ?? []);
-                          }
-                        } else {
-                          setEditSchedType("weekday");
-                          setEditSchedDays([1,2,3,4,5]);
-                          setEditSchedDates([]);
-                          setEditSchedHour(8);
-                          setEditSchedMin(0);
-                        }
-                        setShowTimerModal(action);
+                  {/* 定時設定 */}
+                  <button
+                    disabled={isSharedDevice}
+                    onClick={() => {
+                      if (isSharedDevice) {
                         setShowBtnMenu(null);
-                      }}
-                      className="w-full flex items-center gap-3 px-4 py-3 border rounded-xl text-left bg-slate-800 border-slate-700 active:bg-slate-700"
-                    >
-                      <Clock className="w-4 h-4 text-yellow-400 flex-shrink-0" />
-                      <div className="flex-1">
-                        <p className="text-sm text-slate-200">定時觸發設定</p>
-                        <p className="text-xs text-slate-500">{cfgSummary()}</p>
-                      </div>
-                      {hasCfg && (
-                        <span className="text-[10px] bg-yellow-400/20 border border-yellow-400/40 text-yellow-300 px-1.5 py-0.5 rounded-full">ON</span>
-                      )}
-                    </button>
-                  )}
+                        setToastMsg("共享設備不可設定循環/定時觸發");
+                        setTimeout(() => setToastMsg(null), 2500);
+                        return;
+                      }
+                      setEditTimerMode(cfg?.mode ?? "periodic");
+                      setEditTimerSec(cfg?.intervalSec ?? 60);
+                      if (cfg?.mode === "schedule" && cfg.schedule) {
+                        setEditSchedType(cfg.schedule.type);
+                        setEditSchedHour(cfg.schedule.hour);
+                        setEditSchedMin(cfg.schedule.minute);
+                        if (cfg.schedule.type === "weekday") {
+                          const mask = cfg.schedule.weekMask ?? 31;
+                          setEditSchedDays([1,2,3,4,5,6,7].filter(d => mask & (1<<(d-1))));
+                          setEditSchedDates([]);
+                        } else {
+                          setEditSchedDays([]);
+                          setEditSchedDates(cfg.schedule.dates ?? []);
+                        }
+                      } else {
+                        setEditSchedType("weekday");
+                        setEditSchedDays([1,2,3,4,5]);
+                        setEditSchedDates([]);
+                        setEditSchedHour(8);
+                        setEditSchedMin(0);
+                      }
+                      setShowTimerModal(action);
+                      setShowBtnMenu(null);
+                    }}
+                    className={`w-full flex items-center gap-3 px-4 py-3 border rounded-xl text-left ${
+                      isSharedDevice
+                        ? "bg-slate-800/50 border-slate-800 text-slate-600"
+                        : "bg-slate-800 border-slate-700 active:bg-slate-700"
+                    }`}
+                  >
+                    <Clock className="w-4 h-4 text-yellow-400 flex-shrink-0" />
+                    <div className="flex-1">
+                      <p className="text-sm text-slate-200">定時觸發設定</p>
+                      <p className="text-xs text-slate-500">{cfgSummary()}</p>
+                    </div>
+                    {hasCfg && (
+                      <span className="text-[10px] bg-yellow-400/20 border border-yellow-400/40 text-yellow-300 px-1.5 py-0.5 rounded-full">ON</span>
+                    )}
+                  </button>
                   {/* 快速停用（已啟用時顯示）*/}
                   {hasCfg && !isSharedDevice && (
                     <button onClick={() => { saveTimerConfig(action, null); setShowBtnMenu(null); }}
@@ -2441,14 +2438,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
         const buildCfg = (): TimerCfg => {
           if (editTimerMode === "periodic") {
-            return {
-              mode: "periodic",
-              intervalSec: safeSec,
-              periodicStartedAt: existingCfg?.mode === "periodic" && existingCfg.periodicStartedAt
-                ? existingCfg.periodicStartedAt
-                : Date.now(),
-              active: true,
-            };
+            return { mode:"periodic", intervalSec: safeSec, active: true };
           }
           const mask = editSchedDays.reduce((acc, d) => acc | (1<<(d-1)), 0);
           return {
@@ -2476,14 +2466,15 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                   <h3 className="text-sm font-bold">定時觸發設定</h3>
                   <span className="text-xs text-slate-400 ml-auto">「{btnLabel}」</span>
                 </div>
+                <p className="text-xs text-slate-500 mb-4">設定後存入 ESP32，關閉 App 後照常運作。</p>
 
                 {/* ── 模式選擇 ── */}
                 <p className="text-xs text-slate-400 mb-2">觸發模式</p>
                 <div className="grid grid-cols-2 gap-2 mb-4">
                   {([
-                    { m:"periodic" as const, icon:"🔁", t:"定期觸發" },
-                    { m:"schedule" as const, icon:"📅", t:"排程觸發" },
-                  ]).map(({ m, icon, t }) => (
+                    { m:"periodic" as const, icon:"🔁", t:"定期觸發", sub:"每隔 X 秒自動發送（網頁開啟時）" },
+                    { m:"schedule" as const, icon:"📅", t:"排程觸發", sub:"指定日期與時間，ESP32 自主執行" },
+                  ]).map(({ m, icon, t, sub }) => (
                     <button key={m} onClick={() => setEditTimerMode(m)}
                       className={`flex flex-col items-start gap-0.5 px-3 py-2.5 rounded-xl border text-left ${
                         editTimerMode === m
@@ -2491,6 +2482,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                           : "bg-slate-800 border-slate-700 text-slate-400 active:bg-slate-700"}`}>
                       <span className="text-base">{icon}</span>
                       <span className="text-xs font-semibold">{t}</span>
+                      <span className="text-[10px] leading-tight opacity-70">{sub}</span>
                     </button>
                   ))}
                 </div>
@@ -2621,6 +2613,12 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                       </span>
                     </div>
 
+                    <div className="bg-indigo-500/10 border border-indigo-500/20 rounded-xl px-3 py-2 mb-4">
+                      <p className="text-[11px] text-indigo-300">
+                        📡 排程設定將透過 MQTT 傳送至 ESP32 並存入 NVS。
+                        App 關閉後，ESP32 仍會在設定時間自動觸發繼電器。
+                      </p>
+                    </div>
                   </>
                 )}
 
