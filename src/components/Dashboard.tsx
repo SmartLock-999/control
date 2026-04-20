@@ -587,21 +587,81 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         if (!isActive) return;
         setServerStatusMap((prev) => ({ ...prev, [no]: "Online" }));
 
-        // 訂閱該伺服器上所有設備的 status topic
         const topics = devs
           .filter((d) => d.mqtt_user && d.device_name)
           .map((d) => `device/${d.mqtt_user}/${d.device_name}/status`);
         if (topics.length) client.subscribe(topics, { qos: 0 });
+
+        // 連線後查詢 ESP32 目前的循環 + 排程設定
+        setTimeout(() => {
+          devs.filter(d => d.mqtt_user && d.device_name && !d.share_from).forEach(d => {
+            const cfgTopic = `device/${d.mqtt_user}/${d.device_name}/config`;
+            client.publish(cfgTopic, JSON.stringify({ action: "get_periodic" }), { qos: 1 });
+            client.publish(cfgTopic, JSON.stringify({ action: "get_schedule" }), { qos: 1 });
+          });
+        }, 1500);
       });
 
       client.on("message", (topic, payload) => {
         if (!isActive) return;
         const text = new TextDecoder().decode(payload).trim();
-        let action = text;
-        try { action = (JSON.parse(text) as any)?.action ?? text; } catch {}
-        const online = action.toLowerCase() !== "offline" && action.toLowerCase() !== "disconnected";
+        let parsed: any = null;
+        try { parsed = JSON.parse(text); } catch {}
 
-        // 比對 topic → device.id
+        // ── ESP32 回報循環設定（type:"periodic_cfg"）── 同步更新 state
+        if (parsed?.type === "periodic_cfg" && Array.isArray(parsed.periodics)) {
+          setTimerConfigs(prev => {
+            const updated = { ...prev };
+            (parsed.periodics as any[]).forEach((p: any) => {
+              const a: string = p.target;
+              if (p.active && p.intervalSec >= 60) {
+                // 保留原本 schedule 設定（若有），只更新 periodic 部分
+                const existing = updated[a];
+                if (!existing || existing.mode === "periodic") {
+                  updated[a] = { mode: "periodic", intervalSec: p.intervalSec, active: true };
+                }
+              } else {
+                // ESP32 說停用：如果本地也是 periodic 則清除
+                if (updated[a]?.mode === "periodic") delete updated[a];
+              }
+            });
+            try { localStorage.setItem("btnTimers", JSON.stringify(updated)); } catch {}
+            return updated;
+          });
+          return;
+        }
+
+        // ── ESP32 回報排程設定（type:"schedule_cfg"）── 同步更新 state
+        if (parsed?.type === "schedule_cfg" && Array.isArray(parsed.schedules)) {
+          setTimerConfigs(prev => {
+            const updated = { ...prev };
+            (parsed.schedules as any[]).forEach((s: any) => {
+              const a: string = s.target;
+              if (s.active) {
+                updated[a] = {
+                  mode: "schedule", active: true,
+                  schedule: {
+                    type:     s.stype === 1 || s.stype === "date" ? "date" : "weekday",
+                    weekMask: s.weekMask,
+                    dates:    typeof s.dates === "string"
+                                ? s.dates.split(",").filter(Boolean) : (s.dates ?? []),
+                    hour:     s.hour, minute: s.minute,
+                  },
+                };
+              } else {
+                if (updated[a]?.mode === "schedule") delete updated[a];
+              }
+            });
+            try { localStorage.setItem("btnTimers", JSON.stringify(updated)); } catch {}
+            return updated;
+          });
+          return;
+        }
+
+        // ── 設備在線狀態（status topic）──
+        const action = parsed?.action ?? text;
+        const online = String(action).toLowerCase() !== "offline"
+                    && String(action).toLowerCase() !== "disconnected";
         devs.forEach((d) => {
           if (!d.mqtt_user || !d.device_name) return;
           if (topic === `device/${d.mqtt_user}/${d.device_name}/status`) {
@@ -685,7 +745,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /* ── 送排程設定到 ESP32 config topic ── */
+  /* ── 送設定到 ESP32 config topic（periodic / schedule 兩路分開）── */
   const sendScheduleToDevice = useCallback((action: string, cfg: TimerCfg | null) => {
     const dev  = selectedDeviceRef.current;
     const list = mqttListRef.current;
@@ -697,31 +757,48 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     if (!client?.connected) return;
     const cfgTopic = `device/${dev.mqtt_user}/${dev.device_name}/config`;
 
-    if (!cfg || !cfg.active || cfg.mode !== "schedule") {
-      // 停用排程
+    if (!cfg || !cfg.active) {
+      // 停用：同時清除 ESP32 上的 periodic 和 schedule
       client.publish(cfgTopic,
-        JSON.stringify({ action: "set_schedule", target: action, active: false }),
-        { qos: 1 });
+        JSON.stringify({ action: "set_periodic", target: action, active: false }), { qos: 1 });
+      setTimeout(() => {
+        client.publish(cfgTopic,
+          JSON.stringify({ action: "set_schedule", target: action, active: false }), { qos: 1 });
+      }, 200);
+      console.log("[Timer] Disabled both periodic+schedule on ESP32 for:", action);
       return;
     }
-    const s = cfg.schedule!;
-    const mask = s.weekMask ?? (s.weekMask === 0 ? 0
-      : (s.dates ? 0 : 31)); // fallback Mon-Fri
-    const payload: Record<string, unknown> = {
-      action:  "set_schedule",
-      target:  action,
-      active:  true,
-      stype:   s.type,
-      hour:    s.hour,
-      minute:  s.minute,
-    };
-    if (s.type === "weekday") {
-      payload.weekMask = s.weekMask ?? 31;
-    } else {
-      payload.dates = (s.dates ?? []).join(",");
+
+    if (cfg.mode === "periodic") {
+      // 循環觸發 → set_periodic + 同時停用 schedule
+      const intervalSec = Math.max(60, cfg.intervalSec ?? 60);
+      client.publish(cfgTopic,
+        JSON.stringify({ action: "set_periodic", target: action,
+                         active: true, intervalSec }), { qos: 1 });
+      setTimeout(() => {
+        client.publish(cfgTopic,
+          JSON.stringify({ action: "set_schedule", target: action, active: false }), { qos: 1 });
+      }, 200);
+      console.log("[Timer] Sent set_periodic to ESP32:", action, intervalSec, "s");
+      return;
     }
-    client.publish(cfgTopic, JSON.stringify(payload), { qos: 1 });
-    console.log("[Schedule] sent to", cfgTopic, payload);
+
+    if (cfg.mode === "schedule" && cfg.schedule) {
+      // 排程觸發 → set_schedule + 同時停用 periodic
+      const s = cfg.schedule;
+      const payload: Record<string, unknown> = {
+        action: "set_schedule", target: action, active: true,
+        stype:  s.type, hour: s.hour, minute: s.minute,
+      };
+      if (s.type === "weekday") { payload.weekMask = s.weekMask ?? 31; }
+      else                      { payload.dates    = (s.dates ?? []).join(","); }
+      client.publish(cfgTopic, JSON.stringify(payload), { qos: 1 });
+      setTimeout(() => {
+        client.publish(cfgTopic,
+          JSON.stringify({ action: "set_periodic", target: action, active: false }), { qos: 1 });
+      }, 200);
+      console.log("[Timer] Sent set_schedule to ESP32:", action, payload);
+    }
   }, []);
 
   /* ── 存定時設定（localStorage + MQTT）── */
