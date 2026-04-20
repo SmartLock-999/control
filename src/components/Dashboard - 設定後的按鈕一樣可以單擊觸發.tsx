@@ -184,8 +184,11 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   // 觸發 toast 訊息
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
-  // 按鈕自訂名稱（依設備分開存 localStorage）
-  const [btnLabels, setBtnLabels] = useState<Record<string, string>>({});
+  // 按鈕自訂名稱（key = action，存 localStorage）
+  const [btnLabels, setBtnLabels] = useState<Record<string, string>>(() => {
+    try { return JSON.parse(localStorage.getItem("btnLabels") || "{}"); }
+    catch { return {}; }
+  });
   // 長按改名 modal
   const [editingBtn, setEditingBtn]   = useState<string | null>(null); // action key
   const [editBtnName, setEditBtnName] = useState("");
@@ -230,9 +233,6 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const timerStorageKey = useCallback((dev: DeviceCredential | null) =>
     dev ? `btnTimers_${dev.id}` : "btnTimers_nodev"
   , []);
-  const btnLabelStorageKey = useCallback((dev: DeviceCredential | null) =>
-    dev ? `btnLabels_${dev.id}` : "btnLabels_nodev"
-  , []);
   const lastSelectedDeviceKey = useCallback((userEmail: string) => `last_selected_device_${userEmail}`, []);
 
   const [timerConfigs, setTimerConfigs] = useState<Record<string, TimerCfg>>(() => {
@@ -254,14 +254,9 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   // refs（不觸發 re-render，供 timer callback 安全使用）
   const periodicRefs   = React.useRef<Record<string, ReturnType<typeof setInterval>>>({});
   const periodicCdRefs = React.useRef<Record<string, ReturnType<typeof setInterval>>>({});
-  const periodicMetaRef = React.useRef<Record<string, { intervalSec: number; nextFireAt: number }>>({});
   const selectedDeviceRef = React.useRef<DeviceCredential | null>(null);
   const mqttListRef       = React.useRef<Record<number, string>>({});
-  const runtimeActionKey = useCallback((deviceId: string, action: string) => `${deviceId}::${action}`, []);
-  const readBtnLabelsForDevice = useCallback((dev: DeviceCredential | null): Record<string, string> => {
-    try { return JSON.parse(localStorage.getItem(btnLabelStorageKey(dev)) || "{}"); }
-    catch { return {}; }
-  }, [btnLabelStorageKey]);
+  const btnLabelsRef      = React.useRef<Record<string, string>>({});
   const setActiveDevice = useCallback((device: DeviceCredential | null) => {
     selectedDeviceRef.current = device;
     setSelectedDevice(device);
@@ -427,11 +422,10 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   /* ── refs 同步（讓 timer callback 永遠讀到最新值）── */
   useEffect(() => { selectedDeviceRef.current = selectedDevice; }, [selectedDevice]);
   useEffect(() => { mqttListRef.current = mqttList; },           [mqttList]);
-  useEffect(() => {
-    setBtnLabels(readBtnLabelsForDevice(selectedDevice));
-  }, [readBtnLabelsForDevice, selectedDevice?.id]);
+  useEffect(() => { btnLabelsRef.current = btnLabels; },         [btnLabels]);
 
-  const fireActionForDevice = useCallback((device: DeviceCredential | null, action: string) => {
+  const fireActionViaRef = useCallback((action: string) => {
+    const device = selectedDeviceRef.current;
     const list   = mqttListRef.current;
     if (!device?.mqtt_user || !device?.device_name) return;
     const no = (device.server_no != null && device.server_no > 0) ? device.server_no : 1;
@@ -446,55 +440,49 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     setTimeout(() => setTriggeredAction(null), 1200);
     if (navigator.vibrate) navigator.vibrate([40, 30, 40]);
     const defaultLabels: Record<string, string> = { open: "開", stop: "停", down: "關" };
-    const labels = readBtnLabelsForDevice(device);
-    const label = labels[action] || defaultLabels[action] || action;
+    const label = btnLabelsRef.current[action] || defaultLabels[action] || action;
     setToastMsg(`已觸發「${label}」`);
     setTimeout(() => setToastMsg(null), 2500);
-  }, [readBtnLabelsForDevice]);
-
-  const stopPeriodicByKey = useCallback((key: string) => {
-    clearInterval(periodicRefs.current[key]);
-    clearInterval(periodicCdRefs.current[key]);
-    delete periodicRefs.current[key];
-    delete periodicCdRefs.current[key];
-    delete periodicMetaRef.current[key];
-    setPeriodicCountdowns(prev => { const n = { ...prev }; delete n[key]; return n; });
   }, []);
 
-  // ── 單一設備的單一 action 計時器啟動 / 停止（不影響其他設備/按鈕）──
-  const startPeriodicForAction = useCallback((device: DeviceCredential, action: string, intervalSec: number) => {
-    const key = runtimeActionKey(device.id, action);
-    const existing = periodicMetaRef.current[key];
-    if (existing && existing.intervalSec === intervalSec && periodicRefs.current[key] && periodicCdRefs.current[key]) {
-      return;
-    }
-    stopPeriodicByKey(key);
-    let nextFireAt = Date.now() + intervalSec * 1000;
-    periodicMetaRef.current[key] = { intervalSec, nextFireAt };
-    setPeriodicCountdowns(prev => ({ ...prev, [key]: intervalSec }));
-    periodicCdRefs.current[key] = setInterval(() => {
-      const remainMs = nextFireAt - Date.now();
-      const remainSec = remainMs > 0 ? Math.ceil(remainMs / 1000) : intervalSec;
-      setPeriodicCountdowns(prev => ({ ...prev, [key]: remainSec }));
+  // ── 單一 action 的計時器啟動 / 停止（不影響其他 action）──
+  const startPeriodicForAction = useCallback((action: string, intervalSec: number) => {
+    // 只清除此 action，不動其他
+    clearInterval(periodicRefs.current[action]);
+    clearInterval(periodicCdRefs.current[action]);
+    let cd = intervalSec;
+    setPeriodicCountdowns(prev => ({ ...prev, [action]: cd }));
+    periodicCdRefs.current[action] = setInterval(() => {
+      cd = cd > 1 ? cd - 1 : intervalSec;
+      setPeriodicCountdowns(prev => ({ ...prev, [action]: cd }));
     }, 1000);
-    periodicRefs.current[key] = setInterval(() => {
-      fireActionForDevice(device, action);
-      nextFireAt = Date.now() + intervalSec * 1000;
-      periodicMetaRef.current[key] = { intervalSec, nextFireAt };
-      setPeriodicCountdowns(prev => ({ ...prev, [key]: intervalSec }));
+    periodicRefs.current[action] = setInterval(() => {
+      cd = intervalSec;
+      fireActionViaRef(action);
     }, intervalSec * 1000);
-  }, [fireActionForDevice, runtimeActionKey, stopPeriodicByKey]);
+  }, [fireActionViaRef]);
 
-  const stopPeriodicForAction = useCallback((deviceId: string, action: string) => {
-    stopPeriodicByKey(runtimeActionKey(deviceId, action));
-  }, [runtimeActionKey, stopPeriodicByKey]);
+  const stopPeriodicForAction = useCallback((action: string) => {
+    clearInterval(periodicRefs.current[action]);
+    clearInterval(periodicCdRefs.current[action]);
+    delete periodicRefs.current[action];
+    delete periodicCdRefs.current[action];
+    setPeriodicCountdowns(prev => { const n = { ...prev }; delete n[action]; return n; });
+  }, []);
 
   const stopAllPeriodics = useCallback(() => {
-    Object.keys(periodicRefs.current).forEach(stopPeriodicByKey);
-  }, [stopPeriodicByKey]);
+    Object.keys(periodicRefs.current).forEach(a => {
+      clearInterval(periodicRefs.current[a]);
+      clearInterval(periodicCdRefs.current[a]);
+    });
+    periodicRefs.current   = {};
+    periodicCdRefs.current = {};
+    setPeriodicCountdowns({});
+  }, []);
 
-  /* ── 依目前設備載入該設備設定（切換設備時不重置其他設備倒數）── */
+  /* ── selectedDevice 切換時：重載該設備的計時器設定 ── */
   useEffect(() => {
+    stopAllPeriodics();
     setShowBtnMenu(null);
     setShowTimerModal(null);
     setEditingBtn(null);
@@ -502,6 +490,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
     if (selectedDevice?.share_from) {
       setTimerConfigs({});
+      setPeriodicCountdowns({});
       return;
     }
 
@@ -509,36 +498,13 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     let configs: Record<string, TimerCfg> = {};
     try { configs = JSON.parse(localStorage.getItem(key) || "{}"); } catch {}
     setTimerConfigs(configs);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedDevice?.id, selectedDevice?.share_from]);
-
-  useEffect(() => {
-    const desired = new Map<string, { device: DeviceCredential; action: string; intervalSec: number }>();
-    devices
-      .filter((device) => !device.share_from)
-      .forEach((device) => {
-        let configs: Record<string, TimerCfg> = {};
-        try { configs = JSON.parse(localStorage.getItem(timerStorageKey(device)) || "{}"); } catch {}
-        Object.entries(configs).forEach(([action, cfg]) => {
-          if (cfg.active && cfg.mode === "periodic" && (cfg.intervalSec ?? 0) >= 60) {
-            desired.set(runtimeActionKey(device.id, action), { device, action, intervalSec: cfg.intervalSec! });
-          }
-        });
-      });
-
-    desired.forEach(({ device, action, intervalSec }, key) => {
-      const meta = periodicMetaRef.current[key];
-      if (!meta || meta.intervalSec !== intervalSec || !periodicRefs.current[key] || !periodicCdRefs.current[key]) {
-        startPeriodicForAction(device, action, intervalSec);
+    Object.entries(configs).forEach(([action, cfg]) => {
+      if (cfg.active && cfg.mode === "periodic" && (cfg.intervalSec ?? 0) >= 60) {
+        startPeriodicForAction(action, cfg.intervalSec!);
       }
     });
-
-    Object.keys(periodicRefs.current).forEach((key) => {
-      if (!desired.has(key)) stopPeriodicByKey(key);
-    });
-  }, [devices, runtimeActionKey, startPeriodicForAction, stopPeriodicByKey, timerStorageKey]);
-
-  useEffect(() => () => { stopAllPeriodics(); }, [stopAllPeriodics]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDevice?.id, selectedDevice?.share_from]);
 
   /* ── 登入後從 locations 資料表讀取已儲存的定位點 ── */
   useEffect(() => {
@@ -900,10 +866,10 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       return updated;
     });
     // 只操作此 action 的計時器，不影響其他 action
-    if (dev && cfg?.active && cfg.mode === "periodic" && (cfg.intervalSec ?? 0) >= 60) {
-      startPeriodicForAction(dev, action, cfg.intervalSec!);
+    if (cfg?.active && cfg.mode === "periodic" && (cfg.intervalSec ?? 0) >= 60) {
+      startPeriodicForAction(action, cfg.intervalSec!);
     } else {
-      if (dev) stopPeriodicForAction(dev.id, action);
+      stopPeriodicForAction(action);
     }
     sendScheduleToDevice(action, cfg);
   }, [timerStorageKey, startPeriodicForAction, stopPeriodicForAction, sendScheduleToDevice]);
@@ -938,7 +904,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     if (navigator.vibrate) navigator.vibrate([40, 30, 40]);
     // Toast 提示
     const defaultLabels: Record<string, string> = { open: "開", stop: "停", down: "關" };
-    const label = readBtnLabelsForDevice(device)[action] || defaultLabels[action] || action;
+    const label = btnLabels[action] || defaultLabels[action] || action;
     setToastMsg(`已觸發「${label}」`);
     setTimeout(() => setToastMsg(null), 2500);
   };
@@ -950,7 +916,6 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   };
   const confirmBtnRename = () => {
     if (!editingBtn) return;
-    const dev = selectedDeviceRef.current;
     const defaultLabels: Record<string, string> = { open: "開", stop: "停", down: "關" };
     const trimmed = editBtnName.trim();
     const updated = { ...btnLabels };
@@ -960,7 +925,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       updated[editingBtn] = trimmed;
     }
     setBtnLabels(updated);
-    try { localStorage.setItem(btnLabelStorageKey(dev), JSON.stringify(updated)); } catch {}
+    try { localStorage.setItem("btnLabels", JSON.stringify(updated)); } catch {}
     setEditingBtn(null);
   };
 
@@ -1562,13 +1527,12 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                   pressedColor:"bg-slate-500/90 text-white border-slate-400",
                   glowColor:"shadow-slate-500/40" },
               ] as const).map(({ action, defaultLabel, accent, baseColor, pressedColor, glowColor }) => {
-                const runtimeKey   = selectedDevice ? runtimeActionKey(selectedDevice.id, action) : action;
                 const isPressed   = triggeredAction === action;
                 const label       = btnLabels[action] || defaultLabel;
                 const cfg         = timerConfigs[action];
                 const hasPeriodic = cfg?.active && cfg.mode === "periodic";
                 const hasSchedule = cfg?.active && cfg.mode === "schedule";
-                const pCd         = periodicCountdowns[runtimeKey];
+                const pCd         = periodicCountdowns[action];
 
                 const fontSize = label.length <= 2 ? "1.1rem"
                                : label.length <= 4 ? "0.88rem"
