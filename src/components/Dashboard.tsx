@@ -19,32 +19,45 @@ L.Icon.Default.mergeOptions({
   shadowUrl:     "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
 });
 
-/* ─── 自訂圖示 ─── */
-const gpsIcon = L.divIcon({
-  className: "",
-  html: `<div style="width:16px;height:16px;background:#3b82f6;border:3px solid white;
-    border-radius:50%;box-shadow:0 0 0 5px rgba(59,130,246,0.3);
-    animation:gpsPulse 2s infinite ease-in-out"></div>
-  <style>@keyframes gpsPulse{0%,100%{box-shadow:0 0 0 5px rgba(59,130,246,0.3)}
-    50%{box-shadow:0 0 0 10px rgba(59,130,246,0.05)}}</style>`,
-  iconSize: [16, 16], iconAnchor: [8, 8],
-});
-const pendingIcon = L.divIcon({
-  className: "",
-  html: `<svg width="24" height="32" viewBox="0 0 24 32" xmlns="http://www.w3.org/2000/svg">
-    <path d="M12 0C5.4 0 0 5.4 0 12c0 9 12 20 12 20s12-11 12-20C24 5.4 18.6 0 12 0z"
-      fill="#f97316" stroke="white" stroke-width="2"/>
-    <circle cx="12" cy="12" r="4" fill="white"/></svg>`,
-  iconSize: [24, 32], iconAnchor: [12, 32],
-});
-const savedIcon = L.divIcon({
-  className: "",
-  html: `<svg width="24" height="32" viewBox="0 0 24 32" xmlns="http://www.w3.org/2000/svg">
-    <path d="M12 0C5.4 0 0 5.4 0 12c0 9 12 20 12 20s12-11 12-20C24 5.4 18.6 0 12 0z"
-      fill="#22c55e" stroke="white" stroke-width="2"/>
-    <circle cx="12" cy="12" r="4" fill="white"/></svg>`,
-  iconSize: [24, 32], iconAnchor: [12, 32],
-});
+/* ─── 自訂圖示（lazy 初始化，避免模組載入時 Leaflet 尚未就緒的 TDZ 錯誤）─── */
+let _gpsIcon: L.DivIcon | null = null;
+let _pendingIcon: L.DivIcon | null = null;
+let _savedIcon: L.DivIcon | null = null;
+
+function getGpsIcon(): L.DivIcon {
+  if (!_gpsIcon) _gpsIcon = L.divIcon({
+    className: "",
+    html: `<div style="width:16px;height:16px;background:#3b82f6;border:3px solid white;
+      border-radius:50%;box-shadow:0 0 0 5px rgba(59,130,246,0.3);
+      animation:gpsPulse 2s infinite ease-in-out"></div>
+    <style>@keyframes gpsPulse{0%,100%{box-shadow:0 0 0 5px rgba(59,130,246,0.3)}
+      50%{box-shadow:0 0 0 10px rgba(59,130,246,0.05)}}</style>`,
+    iconSize: [16, 16], iconAnchor: [8, 8],
+  });
+  return _gpsIcon;
+}
+function getPendingIcon(): L.DivIcon {
+  if (!_pendingIcon) _pendingIcon = L.divIcon({
+    className: "",
+    html: `<svg width="24" height="32" viewBox="0 0 24 32" xmlns="http://www.w3.org/2000/svg">
+      <path d="M12 0C5.4 0 0 5.4 0 12c0 9 12 20 12 20s12-11 12-20C24 5.4 18.6 0 12 0z"
+        fill="#f97316" stroke="white" stroke-width="2"/>
+      <circle cx="12" cy="12" r="4" fill="white"/></svg>`,
+    iconSize: [24, 32], iconAnchor: [12, 32],
+  });
+  return _pendingIcon;
+}
+function getSavedIcon(): L.DivIcon {
+  if (!_savedIcon) _savedIcon = L.divIcon({
+    className: "",
+    html: `<svg width="24" height="32" viewBox="0 0 24 32" xmlns="http://www.w3.org/2000/svg">
+      <path d="M12 0C5.4 0 0 5.4 0 12c0 9 12 20 12 20s12-11 12-20C24 5.4 18.6 0 12 0z"
+        fill="#22c55e" stroke="white" stroke-width="2"/>
+      <circle cx="12" cy="12" r="4" fill="white"/></svg>`,
+    iconSize: [24, 32], iconAnchor: [12, 32],
+  });
+  return _savedIcon;
+}
 
 /* ─── 型別 ─── */
 interface DeviceCredential {
@@ -1693,12 +1706,12 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                   <>
                     <Circle center={userPosition} radius={12}
                       pathOptions={{ fillColor:"#3b82f6", fillOpacity:0.15, color:"#3b82f6", weight:1.5 }} />
-                    <Marker position={userPosition} icon={gpsIcon} />
+                    <Marker position={userPosition} icon={getGpsIcon()} />
                   </>
                 )}
-                {pendingLocation && <Marker position={pendingLocation} icon={pendingIcon} />}
+                {pendingLocation && <Marker position={pendingLocation} icon={getPendingIcon()} />}
                 {savedLocations.map((loc) => (
-                  <Marker key={loc.id} position={loc.position} icon={savedIcon} />
+                  <Marker key={loc.id} position={loc.position} icon={getSavedIcon()} />
                 ))}
               </MapContainer>
             </div>
