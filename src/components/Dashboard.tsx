@@ -399,13 +399,13 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     })();
     const currentId = selectedDevice?.id ?? "";
     const next =
-      (storedId ? devices.find((d) => d.id === storedId) : null)
-      || (currentId ? devices.find((d) => d.id === currentId) : null)
+      (currentId ? devices.find((d) => d.id === currentId) : null)
+      || (storedId ? devices.find((d) => d.id === storedId) : null)
       || devices[0]
       || null;
     if (!next) return;
     if (next.id !== currentId) setSelectedDevice(next);
-  }, [devices, email, lastSelectedDeviceKey, selectedDevice?.id]);
+  }, [devices, email, lastSelectedDeviceKey]);
 
   useEffect(() => {
     const id = selectedDevice?.id;
