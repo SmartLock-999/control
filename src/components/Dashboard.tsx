@@ -736,22 +736,24 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   };
 
   /* ── 控制 ── */
-  const handleControl = (action: string) => {
-    if (!selectedDevice?.mqtt_user || !selectedDevice?.device_name) { alert("請先選擇設備"); return; }
-    const brokerUrl = getBrokerUrl(selectedDevice, mqttList);
+  const handleControl = useCallback((action: string) => {
+    // 使用 ref 讀取最新 selectedDevice，避免 useCallback stale closure 問題
+    const device = selectedDeviceRef.current;
+    const list   = mqttListRef.current;
+    if (!device?.mqtt_user || !device?.device_name) { alert("請先選擇設備"); return; }
+    const brokerUrl = getBrokerUrl(device, list);
     if (!brokerUrl) {
-      alert(`設備「${displayName(selectedDevice)}」的伺服器（server_no=${selectedDevice.server_no ?? 1}）URL 未設定，請確認 mqtt_servers 資料表`);
+      alert(`設備「${displayName(device)}」的伺服器（server_no=${device.server_no ?? 1}）URL 未設定，請確認 mqtt_servers 資料表`);
       return;
     }
-    const no = (selectedDevice.server_no != null && selectedDevice.server_no > 0)
-      ? selectedDevice.server_no : 1;
+    const no = (device.server_no != null && device.server_no > 0) ? device.server_no : 1;
     const client = mqttClientsRef.current[no];
     if (!client || !client.connected) {
       alert("伺服器尚未連線，請稍候再試");
       return;
     }
     const pin = action === "open" ? "D4" : action === "stop" ? "D18" : "D19";
-    const topic = `device/${selectedDevice.mqtt_user}/${selectedDevice.device_name}/command`;
+    const topic = `device/${device.mqtt_user}/${device.device_name}/command`;
     const payload = JSON.stringify({ action, pin, ts: Math.floor(Date.now() / 1000) });
     client.publish(topic, payload, { qos: 1 });
     // 按壓動畫
@@ -761,10 +763,11 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     if (navigator.vibrate) navigator.vibrate([40, 30, 40]);
     // Toast 提示
     const defaultLabels: Record<string, string> = { open: "開", stop: "停", down: "關" };
-    const label = btnLabels[action] || defaultLabels[action] || action;
+    const label = btnLabelsRef.current[action] || defaultLabels[action] || action;
     setToastMsg(`已觸發「${label}」`);
     setTimeout(() => setToastMsg(null), 2500);
-  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /* ── 按鈕長按 → 打開選單 ── */
   const handleBtnLongPress = (action: string) => {
@@ -2128,6 +2131,8 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         const btnLabel = btnLabels[action] || defaultLabels[action] || action;
         const cfg = timerConfigs[action];
         const hasCfg = cfg?.active;
+        // 分享來的設備不允許設定定時觸發（無法寫入 ESP32 config topic）
+        const isSharedDevice = !!(selectedDevice?.share_from);
         const modeLabel = cfg?.mode === "schedule" ? "排程觸發" : "定期觸發";
         const fmtSec = (s: number) =>
           s >= 3600 ? `${Math.floor(s/3600)}h${Math.floor((s%3600)/60)}m`
@@ -2168,7 +2173,8 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                       <p className="text-xs text-slate-500">目前：{btnLabel}</p>
                     </div>
                   </button>
-                  {/* 定時設定 */}
+                  {/* 定時設定（分享設備不顯示）*/}
+                  {!isSharedDevice && (
                   <button onClick={() => {
                     // 初始化 modal 編輯狀態
                     setEditTimerMode(cfg?.mode ?? "periodic");
@@ -2204,8 +2210,9 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                       <span className="text-[10px] bg-yellow-400/20 border border-yellow-400/40 text-yellow-300 px-1.5 py-0.5 rounded-full">ON</span>
                     )}
                   </button>
-                  {/* 快速停用（已啟用時顯示）*/}
-                  {hasCfg && (
+                  )}
+                  {/* 快速停用（已啟用 且 非分享設備 時顯示）*/}
+                  {hasCfg && !isSharedDevice && (
                     <button onClick={() => { saveTimerConfig(action, null); setShowBtnMenu(null); }}
                       className="w-full flex items-center gap-3 px-4 py-3 bg-slate-800 border border-red-500/30 rounded-xl active:bg-red-500/10 text-left">
                       <X className="w-4 h-4 text-red-400 flex-shrink-0" />
@@ -2420,12 +2427,6 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                       </span>
                     </div>
 
-                    <div className="bg-indigo-500/10 border border-indigo-500/20 rounded-xl px-3 py-2 mb-4">
-                      <p className="text-[11px] text-indigo-300">
-                        📡 排程設定將透過 MQTT 傳送至 ESP32 並存入 NVS。
-                        App 關閉後，ESP32 仍會在設定時間自動觸發繼電器。
-                      </p>
-                    </div>
                   </>
                 )}
 
