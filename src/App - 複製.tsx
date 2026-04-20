@@ -4,11 +4,6 @@ import LoginScreen from "./components/LoginScreen";
 import Dashboard from "./components/Dashboard";
 import { supabase } from "./utils/supabaseClient";
 
-interface BeforeInstallPromptEvent extends Event {
-  prompt: () => Promise<void>;
-  userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }>;
-}
-
 class ErrorBoundary extends React.Component<
   { children: React.ReactNode },
   { error: Error | null }
@@ -46,35 +41,9 @@ export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [userEmail, setUserEmail]   = useState<string>("");
   const [loading, setLoading]       = useState(true);
-  const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
-  const [showInstallGuide, setShowInstallGuide] = useState(false);
 
   const isSupabaseConfigured =
     import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_ANON_KEY;
-  const isStandalone = typeof window !== "undefined"
-    && (window.matchMedia("(display-mode: standalone)").matches
-      || (window.navigator as Navigator & { standalone?: boolean }).standalone === true);
-  const isIosSafari = typeof navigator !== "undefined"
-    && /iphone|ipad|ipod/i.test(navigator.userAgent)
-    && /safari/i.test(navigator.userAgent)
-    && !/crios|fxios|edgios/i.test(navigator.userAgent);
-
-  useEffect(() => {
-    const onBeforeInstallPrompt = (event: Event) => {
-      event.preventDefault();
-      setInstallPrompt(event as BeforeInstallPromptEvent);
-    };
-    const onAppInstalled = () => {
-      setInstallPrompt(null);
-      setShowInstallGuide(false);
-    };
-    window.addEventListener("beforeinstallprompt", onBeforeInstallPrompt);
-    window.addEventListener("appinstalled", onAppInstalled);
-    return () => {
-      window.removeEventListener("beforeinstallprompt", onBeforeInstallPrompt);
-      window.removeEventListener("appinstalled", onAppInstalled);
-    };
-  }, []);
 
   useEffect(() => {
     if (!isSupabaseConfigured) { setLoading(false); return; }
@@ -106,44 +75,6 @@ export default function App() {
     return () => subscription.unsubscribe();
   }, [isSupabaseConfigured]);
 
-  const handleInstall = async () => {
-    if (installPrompt) {
-      await installPrompt.prompt();
-      await installPrompt.userChoice.catch(() => null);
-      setInstallPrompt(null);
-      return;
-    }
-    if (isIosSafari && !isStandalone) {
-      setShowInstallGuide(true);
-    }
-  };
-
-  const installButton = (!isStandalone && (installPrompt || isIosSafari)) ? (
-    <button
-      onClick={() => void handleInstall()}
-      className="fixed right-4 bottom-4 z-[100000] rounded-full bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-xl active:bg-blue-700"
-    >
-      安裝到首頁
-    </button>
-  ) : null;
-
-  const installGuide = showInstallGuide ? (
-    <div className="fixed inset-0 z-[100001] bg-black/70 p-4 flex items-center justify-center">
-      <div className="w-full max-w-sm rounded-2xl border border-slate-700 bg-slate-900 p-5">
-        <h3 className="mb-2 text-base font-bold text-white">安裝到首頁</h3>
-        <p className="mb-4 text-sm leading-6 text-slate-300">
-          iPhone 或 iPad 請點瀏覽器的分享按鈕，再選「加入主畫面」。
-        </p>
-        <button
-          onClick={() => setShowInstallGuide(false)}
-          className="w-full rounded-xl border border-slate-600 py-2.5 text-sm text-slate-200 active:bg-slate-800"
-        >
-          關閉
-        </button>
-      </div>
-    </div>
-  ) : null;
-
   if (!isSupabaseConfigured) return (
     <div className="min-h-screen flex items-center justify-center bg-slate-950 p-4">
       <div className="max-w-md w-full bg-slate-900 border border-red-500/50 rounded-2xl p-6 shadow-2xl">
@@ -161,40 +92,28 @@ export default function App() {
   );
 
   if (loading) return (
-    <>
-      <div className="min-h-screen flex items-center justify-center bg-slate-950">
-        <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
-      </div>
-      {installButton}
-      {installGuide}
-    </>
+    <div className="min-h-screen flex items-center justify-center bg-slate-950">
+      <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+    </div>
   );
 
   if (!isLoggedIn) return (
-    <>
-      <ErrorBoundary>
-        <LoginScreen onLogin={(email) => { setIsLoggedIn(true); setUserEmail(email); }} />
-      </ErrorBoundary>
-      {installButton}
-      {installGuide}
-    </>
+    <ErrorBoundary>
+      <LoginScreen onLogin={(email) => { setIsLoggedIn(true); setUserEmail(email); }} />
+    </ErrorBoundary>
   );
 
   return (
-    <>
-      <ErrorBoundary>
-        <Dashboard
-          email={userEmail}
-          onLogout={() => {
-            localStorage.removeItem("rememberMe");
-            localStorage.removeItem("savedEmail");
-            setIsLoggedIn(false);
-            setUserEmail("");
-          }}
-        />
-      </ErrorBoundary>
-      {installButton}
-      {installGuide}
-    </>
+    <ErrorBoundary>
+      <Dashboard
+        email={userEmail}
+        onLogout={() => {
+          localStorage.removeItem("rememberMe");
+          localStorage.removeItem("savedEmail");
+          setIsLoggedIn(false);
+          setUserEmail("");
+        }}
+      />
+    </ErrorBoundary>
   );
 }
