@@ -7,7 +7,7 @@ import {
 import L from "leaflet";
 import {
   Crosshair, ChevronLeft, ChevronRight,
-  LogOut, Settings, Share2, Trash2, X, MapPin, UserMinus, Users, Pencil,
+  LogOut, Settings, Share2, Trash2, X, MapPin, UserMinus, Users, Pencil, Clock, Timer,
 } from "lucide-react";
 import { supabase } from "../utils/supabaseClient";
 import mqtt from "mqtt";
@@ -82,6 +82,20 @@ interface SavedLocation {
   id: string;
   label: string;
   position: [number, number];
+}
+// 定時設定（存 localStorage）
+interface SchedDef {
+  type: "weekday" | "date";
+  weekMask?: number;   // bit0=週一…bit6=週日
+  dates?: string[];    // ["YYYY-MM-DD"]
+  hour: number;
+  minute: number;
+}
+interface TimerCfg {
+  mode: "periodic" | "schedule";
+  intervalSec?: number;   // periodic 用，最短 60 秒
+  schedule?: SchedDef;    // schedule 用（送到 ESP32）
+  active: boolean;
 }
 
 /* ─── 地圖子元件 ─── */
@@ -214,6 +228,29 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   // 儲存各 server_no 的 MQTT client，供 handleControl 發布指令
   const mqttClientsRef = React.useRef<Record<number, mqtt.MqttClient>>({});
 
+  // ── 定時觸發 state ──
+  const [timerConfigs, setTimerConfigs] = useState<Record<string, TimerCfg>>(() => {
+    try { return JSON.parse(localStorage.getItem("btnTimers") || "{}"); } catch { return {}; }
+  });
+  const [periodicCountdowns, setPeriodicCountdowns] = useState<Record<string, number>>({});
+  const [showBtnMenu, setShowBtnMenu]               = useState<string | null>(null);
+  const [showTimerModal, setShowTimerModal]         = useState<string | null>(null);
+  // periodic 編輯
+  const [editTimerSec, setEditTimerSec]   = useState(60);
+  // schedule 編輯
+  const [editTimerMode, setEditTimerMode]     = useState<"periodic"|"schedule">("periodic");
+  const [editSchedType, setEditSchedType]     = useState<"weekday"|"date">("weekday");
+  const [editSchedDays, setEditSchedDays]     = useState<number[]>([1,2,3,4,5]); // 1=Mon…7=Sun
+  const [editSchedDates, setEditSchedDates]   = useState<string[]>([]);
+  const [editSchedHour, setEditSchedHour]     = useState(8);
+  const [editSchedMin, setEditSchedMin]       = useState(0);
+  // refs（不觸發 re-render，供 timer callback 安全使用）
+  const periodicRefs   = React.useRef<Record<string, ReturnType<typeof setInterval>>>({});
+  const periodicCdRefs = React.useRef<Record<string, ReturnType<typeof setInterval>>>({});
+  const selectedDeviceRef = React.useRef<DeviceCredential | null>(null);
+  const mqttListRef       = React.useRef<Record<number, string>>({});
+  const btnLabelsRef      = React.useRef<Record<string, string>>({});
+
   const isOwnDevice    = !!(selectedDevice && !selectedDevice.share_from);
   // count 本身就代表剩餘次數（每次分享 -1）
   const shareRemaining = isOwnDevice ? (selectedDevice?.share_count ?? 0) : null;
@@ -344,6 +381,47 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   }, [email]);
 
   useEffect(() => { fetchDevices(); }, [fetchDevices]);
+
+  /* ── refs 同步（讓 timer callback 永遠讀到最新值）── */
+  useEffect(() => { selectedDeviceRef.current = selectedDevice; }, [selectedDevice]);
+  useEffect(() => { mqttListRef.current = mqttList; },           [mqttList]);
+  useEffect(() => { btnLabelsRef.current = btnLabels; },         [btnLabels]);
+
+  /* ── 定期觸發：timerConfigs 改變時重建所有 periodic interval ── */
+  useEffect(() => {
+    // 先清除全部舊的
+    Object.values(periodicRefs.current).forEach(clearInterval);
+    Object.values(periodicCdRefs.current).forEach(clearInterval);
+    periodicRefs.current   = {};
+    periodicCdRefs.current = {};
+
+    const initCountdowns: Record<string, number> = {};
+
+    Object.entries(timerConfigs).forEach(([action, cfg]) => {
+      if (!cfg.active || cfg.mode !== "periodic") return;
+      let cd = cfg.intervalSec;
+      initCountdowns[action] = cd;
+
+      // 倒數顯示（每秒 -1）
+      periodicCdRefs.current[action] = setInterval(() => {
+        cd = cd > 1 ? cd - 1 : cfg.intervalSec;
+        setPeriodicCountdowns(prev => ({ ...prev, [action]: cd }));
+      }, 1000);
+
+      // 主觸發
+      periodicRefs.current[action] = setInterval(() => {
+        cd = cfg.intervalSec; // 倒數歸位（倒數 interval 下次重置）
+        fireActionViaRef(action);
+      }, cfg.intervalSec * 1000);
+    });
+
+    setPeriodicCountdowns(initCountdowns);
+    return () => {
+      Object.values(periodicRefs.current).forEach(clearInterval);
+      Object.values(periodicCdRefs.current).forEach(clearInterval);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timerConfigs]);
 
   /* ── 登入後從 locations 資料表讀取已儲存的定位點 ── */
   useEffect(() => {
@@ -579,6 +657,84 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     finally { setResetting(false); }
   };
 
+  /* ── MQTT 發送（ref-safe，可在 setInterval/setTimeout 裡安全呼叫）── */
+  const fireActionViaRef = useCallback((action: string) => {
+    const device = selectedDeviceRef.current;
+    const list   = mqttListRef.current;
+    if (!device?.mqtt_user || !device?.device_name) return;
+    const brokerUrl = getBrokerUrl(device, list);
+    if (!brokerUrl) return;
+    const no = (device.server_no != null && device.server_no > 0) ? device.server_no : 1;
+    const client = mqttClientsRef.current[no];
+    if (!client?.connected) return;
+    const pin   = action === "open" ? "D4" : action === "stop" ? "D18" : "D19";
+    const topic = `device/${device.mqtt_user}/${device.device_name}/command`;
+    client.publish(topic, JSON.stringify({ action, pin, ts: Math.floor(Date.now() / 1000) }), { qos: 1 });
+    setTriggeredAction(action);
+    setTimeout(() => setTriggeredAction(null), 1200);
+    if (navigator.vibrate) navigator.vibrate([40, 30, 40]);
+    const defaultLabels: Record<string, string> = { open: "開", stop: "停", down: "關" };
+    const label = btnLabelsRef.current[action] || defaultLabels[action] || action;
+    setToastMsg(`已觸發「${label}」`);
+    setTimeout(() => setToastMsg(null), 2500);
+  }, []);
+
+  /* ── 按鈕點擊：periodic/schedule 模式下直接手動觸發，其餘由 ESP32 排程執行 ── */
+  const handleBtnClick = useCallback((action: string) => {
+    handleControl(action);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /* ── 送排程設定到 ESP32 config topic ── */
+  const sendScheduleToDevice = useCallback((action: string, cfg: TimerCfg | null) => {
+    const dev  = selectedDeviceRef.current;
+    const list = mqttListRef.current;
+    if (!dev?.mqtt_user || !dev?.device_name) return;
+    const brokerUrl = getBrokerUrl(dev, list);
+    if (!brokerUrl) return;
+    const no     = (dev.server_no != null && dev.server_no > 0) ? dev.server_no : 1;
+    const client = mqttClientsRef.current[no];
+    if (!client?.connected) return;
+    const cfgTopic = `device/${dev.mqtt_user}/${dev.device_name}/config`;
+
+    if (!cfg || !cfg.active || cfg.mode !== "schedule") {
+      // 停用排程
+      client.publish(cfgTopic,
+        JSON.stringify({ action: "set_schedule", target: action, active: false }),
+        { qos: 1 });
+      return;
+    }
+    const s = cfg.schedule!;
+    const mask = s.weekMask ?? (s.weekMask === 0 ? 0
+      : (s.dates ? 0 : 31)); // fallback Mon-Fri
+    const payload: Record<string, unknown> = {
+      action:  "set_schedule",
+      target:  action,
+      active:  true,
+      stype:   s.type,
+      hour:    s.hour,
+      minute:  s.minute,
+    };
+    if (s.type === "weekday") {
+      payload.weekMask = s.weekMask ?? 31;
+    } else {
+      payload.dates = (s.dates ?? []).join(",");
+    }
+    client.publish(cfgTopic, JSON.stringify(payload), { qos: 1 });
+    console.log("[Schedule] sent to", cfgTopic, payload);
+  }, []);
+
+  /* ── 存定時設定（localStorage + MQTT）── */
+  const saveTimerConfig = (action: string, cfg: TimerCfg | null) => {
+    setTimerConfigs(prev => {
+      const updated = { ...prev };
+      if (cfg === null) { delete updated[action]; } else { updated[action] = cfg; }
+      try { localStorage.setItem("btnTimers", JSON.stringify(updated)); } catch {}
+      return updated;
+    });
+    sendScheduleToDevice(action, cfg);
+  };
+
   /* ── 控制 ── */
   const handleControl = (action: string) => {
     if (!selectedDevice?.mqtt_user || !selectedDevice?.device_name) { alert("請先選擇設備"); return; }
@@ -610,11 +766,10 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     setTimeout(() => setToastMsg(null), 2500);
   };
 
-  /* ── 按鈕長按改名 ── */
+  /* ── 按鈕長按 → 打開選單 ── */
   const handleBtnLongPress = (action: string) => {
-    const defaultLabels: Record<string, string> = { open: "開", stop: "停", down: "關" };
-    setEditBtnName(btnLabels[action] || defaultLabels[action] || "");
-    setEditingBtn(action);
+    if (navigator.vibrate) navigator.vibrate(50);
+    setShowBtnMenu(action);
   };
   const confirmBtnRename = () => {
     if (!editingBtn) return;
@@ -1210,67 +1365,104 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
           {/* 手動控制 */}
           <div className="mb-2">
-            <p className="text-xs text-slate-500 mb-1.5 px-0.5">手動控制</p>
+            <p className="text-xs text-slate-500 mb-1.5 px-0.5">
+              手動控制
+              <span className="text-slate-700 ml-1">（長按可設定）</span>
+            </p>
             <div className="grid grid-cols-3 gap-2">
-              {[
-                { action:"open",
-                  defaultLabel:"開",
-                  baseColor:"border-blue-500 text-blue-400",
+              {([
+                { action:"open", defaultLabel:"開",
+                  accent:"#3b82f6", baseColor:"border-blue-500 text-blue-400",
                   pressedColor:"bg-blue-500/90 text-white border-blue-400",
                   glowColor:"shadow-blue-500/50" },
-                { action:"stop",
-                  defaultLabel:"停",
-                  baseColor:"border-red-500 text-red-400",
+                { action:"stop", defaultLabel:"停",
+                  accent:"#ef4444", baseColor:"border-red-500 text-red-400",
                   pressedColor:"bg-red-500/90 text-white border-red-400",
                   glowColor:"shadow-red-500/50" },
-                { action:"down",
-                  defaultLabel:"關",
-                  baseColor:"border-slate-600 text-slate-300",
+                { action:"down", defaultLabel:"關",
+                  accent:"#94a3b8", baseColor:"border-slate-600 text-slate-300",
                   pressedColor:"bg-slate-500/90 text-white border-slate-400",
                   glowColor:"shadow-slate-500/40" },
-              ].map(({ action, defaultLabel, baseColor, pressedColor, glowColor }) => {
-                const isPressed = triggeredAction === action;
-                const label = btnLabels[action] || defaultLabel;
-                // 字數越多字體越小
-                const fontSize = label.length <= 2 ? "1.125rem"
-                               : label.length <= 4 ? "0.9rem"
-                               : label.length <= 6 ? "0.75rem"
-                               : "0.65rem";
+              ] as const).map(({ action, defaultLabel, accent, baseColor, pressedColor, glowColor }) => {
+                const isPressed   = triggeredAction === action;
+                const label       = btnLabels[action] || defaultLabel;
+                const cfg         = timerConfigs[action];
+                const hasPeriodic = cfg?.active && cfg.mode === "periodic";
+                const hasSchedule = cfg?.active && cfg.mode === "schedule";
+                const pCd         = periodicCountdowns[action];
+
+                const fontSize = label.length <= 2 ? "1.1rem"
+                               : label.length <= 4 ? "0.88rem"
+                               : label.length <= 6 ? "0.74rem" : "0.64rem";
+
+                const progress = (hasPeriodic && cfg?.intervalSec && pCd != null)
+                  ? ((cfg.intervalSec - pCd) / cfg.intervalSec) * 100 : 0;
+
+                // 排程副文字：顯示 HH:MM
+                const schedSubLabel = hasSchedule && cfg?.schedule
+                  ? `${String(cfg.schedule.hour).padStart(2,"0")}:${String(cfg.schedule.minute).padStart(2,"0")}`
+                  : null;
+
                 return (
-                  <button
-                    key={action}
-                    onPointerDown={() => {
-                      longPressTimer.current = setTimeout(() => handleBtnLongPress(action), 600);
-                    }}
-                    onPointerUp={() => {
-                      if (longPressTimer.current) {
-                        clearTimeout(longPressTimer.current);
-                        longPressTimer.current = null;
-                      }
-                    }}
-                    onPointerLeave={() => {
-                      if (longPressTimer.current) {
-                        clearTimeout(longPressTimer.current);
-                        longPressTimer.current = null;
-                      }
-                    }}
-                    onClick={() => handleControl(action)}
-                    style={{
-                      transition: "transform 0.1s ease, box-shadow 0.15s ease, background-color 0.12s ease",
-                      fontSize,
-                    }}
-                    className={`
-                      py-3 md:py-4 rounded-xl border-2 font-bold bg-slate-900
-                      flex items-center justify-center text-center
-                      leading-tight px-1 break-words min-h-[56px]
-                      select-none
-                      ${isPressed
-                        ? `${pressedColor} scale-95 shadow-lg ${glowColor}`
-                        : `${baseColor} active:scale-95`}
-                    `}
-                  >
-                    {isPressed ? "✓" : label}
-                  </button>
+                  <div key={action} className="relative">
+                    <button
+                      onPointerDown={() => {
+                        longPressTimer.current = setTimeout(() => handleBtnLongPress(action), 600);
+                      }}
+                      onPointerUp={() => {
+                        if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
+                      }}
+                      onPointerLeave={() => {
+                        if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
+                      }}
+                      onClick={() => handleBtnClick(action)}
+                      style={{
+                        fontSize,
+                        transition: "transform 0.1s, background-color 0.12s",
+                        ...(hasPeriodic && !isPressed ? {
+                          animation: "timerPulse 2.5s ease-in-out infinite",
+                          boxShadow: `0 0 12px 3px ${accent}55, inset 0 0 16px ${accent}18`,
+                        } : {}),
+                        ...(hasSchedule && !isPressed ? {
+                          animation: "schedPulse 4s ease-in-out infinite",
+                          boxShadow: `0 0 10px 2px #818cf844, inset 0 0 14px #818cf814`,
+                        } : {}),
+                      }}
+                      className={`
+                        w-full py-3 md:py-4 rounded-xl border-2 font-bold
+                        flex flex-col items-center justify-center text-center
+                        leading-tight px-1 break-words min-h-[68px] select-none
+                        relative overflow-hidden
+                        ${isPressed
+                          ? `${pressedColor} scale-95 shadow-lg ${glowColor}`
+                          : `${baseColor} bg-slate-900 active:scale-95`}
+                      `}
+                    >
+                      {/* periodic 進度條 */}
+                      {hasPeriodic && (
+                        <span className="absolute bottom-0 left-0 h-[3px] rounded-full transition-[width] duration-1000"
+                          style={{ width: `${progress}%`, background: accent }} />
+                      )}
+                      {/* 主文字 */}
+                      <span>{isPressed ? "✓" : label}</span>
+                      {/* 副文字 */}
+                      {!isPressed && (hasPeriodic || hasSchedule) && (
+                        <span className="text-[9px] font-mono opacity-60 leading-none mt-0.5">
+                          {hasPeriodic
+                            ? (pCd != null ? (pCd >= 60 ? `${Math.floor(pCd/60)}m${pCd%60}s` : `${pCd}s`) : "")
+                            : schedSubLabel ?? ""}
+                        </span>
+                      )}
+                    </button>
+                    {/* 角標 */}
+                    {(hasPeriodic || hasSchedule) && (
+                      <span className="absolute top-1 right-1 pointer-events-none opacity-60">
+                        {hasPeriodic
+                          ? <Clock  style={{ width:10, height:10, color: accent }} />
+                          : <Timer  style={{ width:10, height:10, color:"#818cf8" }} />}
+                      </span>
+                    )}
+                  </div>
                 );
               })}
             </div>
@@ -1929,6 +2121,340 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         </PortalModal>
       )}
 
+      {/* ══ 按鈕長按選單 ══ */}
+      {showBtnMenu && (() => {
+        const action = showBtnMenu;
+        const defaultLabels: Record<string,string> = { open:"開", stop:"停", down:"關" };
+        const btnLabel = btnLabels[action] || defaultLabels[action] || action;
+        const cfg = timerConfigs[action];
+        const hasCfg = cfg?.active;
+        const modeLabel = cfg?.mode === "schedule" ? "排程觸發" : "定期觸發";
+        const fmtSec = (s: number) =>
+          s >= 3600 ? `${Math.floor(s/3600)}h${Math.floor((s%3600)/60)}m`
+                    : s >= 60   ? `${Math.floor(s/60)}m${s%60 > 0 ? `${s%60}s` : ""}` : `${s}s`;
+        const cfgSummary = () => {
+          if (!hasCfg || !cfg) return "未設定";
+          if (cfg.mode === "periodic") return `定期觸發 · 每 ${fmtSec(cfg.intervalSec ?? 60)}`;
+          const s = cfg.schedule;
+          if (!s) return "排程觸發（未設定）";
+          const t = `${String(s.hour).padStart(2,"0")}:${String(s.minute).padStart(2,"0")}`;
+          if (s.type === "weekday") {
+            const dayNames = ["一","二","三","四","五","六","日"];
+            const days = dayNames.filter((_,i) => (s.weekMask ?? 31) & (1<<i)).join("、");
+            return `排程 · 週${days} ${t}`;
+          }
+          const cnt = s.dates?.length ?? 0;
+          return `排程 · ${cnt} 個日期 ${t}`;
+        };
+        return (
+          <PortalModal>
+            <div className="fixed inset-0 bg-black/70 flex items-end justify-center" style={{ zIndex: 99999 }}
+              onClick={() => setShowBtnMenu(null)}>
+              <div className="bg-slate-900 border-t border-slate-700 rounded-t-2xl p-5 w-full max-w-lg"
+                onClick={e => e.stopPropagation()}>
+                <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto mb-3" />
+                <p className="text-xs text-slate-400 text-center mb-4">「{btnLabel}」設定</p>
+                <div className="space-y-2">
+                  {/* 改名 */}
+                  <button onClick={() => {
+                    setShowBtnMenu(null);
+                    const defaultLabels2: Record<string,string> = { open:"開", stop:"停", down:"關" };
+                    setEditBtnName(btnLabels[action] || defaultLabels2[action] || "");
+                    setEditingBtn(action);
+                  }} className="w-full flex items-center gap-3 px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl active:bg-slate-700 text-left">
+                    <Pencil className="w-4 h-4 text-slate-400 flex-shrink-0" />
+                    <div>
+                      <p className="text-sm text-slate-200">修改按鈕名稱</p>
+                      <p className="text-xs text-slate-500">目前：{btnLabel}</p>
+                    </div>
+                  </button>
+                  {/* 定時設定 */}
+                  <button onClick={() => {
+                    // 初始化 modal 編輯狀態
+                    setEditTimerMode(cfg?.mode ?? "periodic");
+                    setEditTimerSec(cfg?.intervalSec ?? 60);
+                    if (cfg?.mode === "schedule" && cfg.schedule) {
+                      setEditSchedType(cfg.schedule.type);
+                      setEditSchedHour(cfg.schedule.hour);
+                      setEditSchedMin(cfg.schedule.minute);
+                      if (cfg.schedule.type === "weekday") {
+                        const mask = cfg.schedule.weekMask ?? 31;
+                        setEditSchedDays([1,2,3,4,5,6,7].filter(d => mask & (1<<(d-1))));
+                        setEditSchedDates([]);
+                      } else {
+                        setEditSchedDays([]);
+                        setEditSchedDates(cfg.schedule.dates ?? []);
+                      }
+                    } else {
+                      setEditSchedType("weekday");
+                      setEditSchedDays([1,2,3,4,5]);
+                      setEditSchedDates([]);
+                      setEditSchedHour(8);
+                      setEditSchedMin(0);
+                    }
+                    setShowTimerModal(action);
+                    setShowBtnMenu(null);
+                  }} className="w-full flex items-center gap-3 px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl active:bg-slate-700 text-left">
+                    <Clock className="w-4 h-4 text-yellow-400 flex-shrink-0" />
+                    <div className="flex-1">
+                      <p className="text-sm text-slate-200">定時觸發設定</p>
+                      <p className="text-xs text-slate-500">{cfgSummary()}</p>
+                    </div>
+                    {hasCfg && (
+                      <span className="text-[10px] bg-yellow-400/20 border border-yellow-400/40 text-yellow-300 px-1.5 py-0.5 rounded-full">ON</span>
+                    )}
+                  </button>
+                  {/* 快速停用（已啟用時顯示）*/}
+                  {hasCfg && (
+                    <button onClick={() => { saveTimerConfig(action, null); setShowBtnMenu(null); }}
+                      className="w-full flex items-center gap-3 px-4 py-3 bg-slate-800 border border-red-500/30 rounded-xl active:bg-red-500/10 text-left">
+                      <X className="w-4 h-4 text-red-400 flex-shrink-0" />
+                      <p className="text-sm text-red-400">停用定時觸發</p>
+                    </button>
+                  )}
+                </div>
+                <button onClick={() => setShowBtnMenu(null)}
+                  className="w-full mt-3 py-2.5 rounded-xl border border-slate-600 text-slate-300 text-sm active:bg-slate-800">
+                  取消
+                </button>
+              </div>
+            </div>
+          </PortalModal>
+        );
+      })()}
+
+      {/* ══ 定時觸發設定 Modal ══ */}
+      {showTimerModal && (() => {
+        const action = showTimerModal;
+        const defaultLabels: Record<string,string> = { open:"開", stop:"停", down:"關" };
+        const btnLabel    = btnLabels[action] || defaultLabels[action] || action;
+        const existingCfg = timerConfigs[action];
+        const safeSec     = Math.max(60, editTimerSec);
+        const fmtSec = (s: number) =>
+          s >= 3600 ? `${Math.floor(s/3600)} 小時 ${Math.floor((s%3600)/60)} 分鐘`
+                    : `${Math.floor(s/60)} 分鐘${s%60>0?` ${s%60} 秒`:""}`;
+        const DAY_NAMES = ["一","二","三","四","五","六","日"];
+
+        const toggleDay = (d: number) =>
+          setEditSchedDays(prev => prev.includes(d) ? prev.filter(x=>x!==d) : [...prev,d].sort());
+
+        const addDate = (v: string) => {
+          if (!v || editSchedDates.includes(v)) return;
+          setEditSchedDates(prev => [...prev, v].sort());
+        };
+
+        const buildCfg = (): TimerCfg => {
+          if (editTimerMode === "periodic") {
+            return { mode:"periodic", intervalSec: safeSec, active: true };
+          }
+          const mask = editSchedDays.reduce((acc, d) => acc | (1<<(d-1)), 0);
+          return {
+            mode: "schedule",
+            active: true,
+            schedule: {
+              type:     editSchedType,
+              weekMask: editSchedType === "weekday" ? mask : 0,
+              dates:    editSchedType === "date"    ? editSchedDates : [],
+              hour:     editSchedHour,
+              minute:   editSchedMin,
+            },
+          };
+        };
+
+        return (
+          <PortalModal>
+            <div className="fixed inset-0 bg-black/70 flex items-end justify-center" style={{ zIndex: 99999 }}
+              onClick={() => setShowTimerModal(null)}>
+              <div className="bg-slate-900 border-t border-yellow-500/40 rounded-t-2xl p-5 w-full max-w-lg max-h-[90vh] overflow-y-auto"
+                onClick={e => e.stopPropagation()}>
+                <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto mb-3" />
+                <div className="flex items-center gap-2 mb-1">
+                  <Clock className="w-4 h-4 text-yellow-400" />
+                  <h3 className="text-sm font-bold">定時觸發設定</h3>
+                  <span className="text-xs text-slate-400 ml-auto">「{btnLabel}」</span>
+                </div>
+                <p className="text-xs text-slate-500 mb-4">設定後存入 ESP32，關閉 App 後照常運作。</p>
+
+                {/* ── 模式選擇 ── */}
+                <p className="text-xs text-slate-400 mb-2">觸發模式</p>
+                <div className="grid grid-cols-2 gap-2 mb-4">
+                  {([
+                    { m:"periodic" as const, icon:"🔁", t:"定期觸發", sub:"每隔 X 秒自動發送（網頁開啟時）" },
+                    { m:"schedule" as const, icon:"📅", t:"排程觸發", sub:"指定日期與時間，ESP32 自主執行" },
+                  ]).map(({ m, icon, t, sub }) => (
+                    <button key={m} onClick={() => setEditTimerMode(m)}
+                      className={`flex flex-col items-start gap-0.5 px-3 py-2.5 rounded-xl border text-left ${
+                        editTimerMode === m
+                          ? "bg-yellow-500/15 border-yellow-500 text-yellow-200"
+                          : "bg-slate-800 border-slate-700 text-slate-400 active:bg-slate-700"}`}>
+                      <span className="text-base">{icon}</span>
+                      <span className="text-xs font-semibold">{t}</span>
+                      <span className="text-[10px] leading-tight opacity-70">{sub}</span>
+                    </button>
+                  ))}
+                </div>
+
+                {/* ── periodic ── */}
+                {editTimerMode === "periodic" && (
+                  <>
+                    <p className="text-xs text-slate-400 mb-1.5">觸發間隔（秒，最短 60）</p>
+                    <input type="number" min={60} max={86400}
+                      value={editTimerSec}
+                      onChange={e => setEditTimerSec(Math.max(60, parseInt(e.target.value)||60))}
+                      className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white text-sm focus:outline-none focus:border-yellow-500 mb-1.5"
+                    />
+                    <p className="text-xs text-yellow-400/80 mb-3">→ {fmtSec(safeSec)}</p>
+                    <div className="flex gap-1.5 flex-wrap mb-2">
+                      {[60,120,300,600,1800,3600].map(s => (
+                        <button key={s} onClick={() => setEditTimerSec(s)}
+                          className={`px-2.5 py-1 rounded-lg text-xs border ${
+                            editTimerSec===s
+                              ? "bg-yellow-500/20 border-yellow-500 text-yellow-300"
+                              : "bg-slate-800 border-slate-700 text-slate-400 active:bg-slate-700"}`}>
+                          {s>=3600?`${s/3600}h`:`${s/60}m`}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+
+                {/* ── schedule ── */}
+                {editTimerMode === "schedule" && (
+                  <>
+                    {/* 日期類型 */}
+                    <p className="text-xs text-slate-400 mb-2">觸發日</p>
+                    <div className="grid grid-cols-2 gap-2 mb-4">
+                      {([
+                        { v:"weekday" as const, label:"工作日 / 每週重複" },
+                        { v:"date"    as const, label:"指定特定日期" },
+                      ]).map(({ v, label }) => (
+                        <button key={v} onClick={() => setEditSchedType(v)}
+                          className={`py-2 rounded-xl border text-xs font-medium ${
+                            editSchedType===v
+                              ? "bg-indigo-500/20 border-indigo-400 text-indigo-200"
+                              : "bg-slate-800 border-slate-700 text-slate-400 active:bg-slate-700"}`}>
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* weekday picker */}
+                    {editSchedType === "weekday" && (
+                      <div className="mb-4">
+                        <div className="flex gap-1.5 justify-between mb-2">
+                          {DAY_NAMES.map((name, i) => {
+                            const d = i + 1;
+                            const on = editSchedDays.includes(d);
+                            return (
+                              <button key={d} onClick={() => toggleDay(d)}
+                                className={`flex-1 py-2 rounded-lg text-xs font-bold border ${
+                                  on ? "bg-indigo-500 border-indigo-400 text-white"
+                                     : "bg-slate-800 border-slate-700 text-slate-400 active:bg-slate-700"}`}>
+                                {name}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <div className="flex gap-2">
+                          <button onClick={() => setEditSchedDays([1,2,3,4,5])}
+                            className="text-xs text-indigo-400 px-2 py-1 bg-indigo-500/10 border border-indigo-500/30 rounded-lg active:bg-indigo-500/20">
+                            週一~五
+                          </button>
+                          <button onClick={() => setEditSchedDays([1,2,3,4,5,6,7])}
+                            className="text-xs text-indigo-400 px-2 py-1 bg-indigo-500/10 border border-indigo-500/30 rounded-lg active:bg-indigo-500/20">
+                            每天
+                          </button>
+                          <button onClick={() => setEditSchedDays([])}
+                            className="text-xs text-slate-400 px-2 py-1 bg-slate-800 border border-slate-700 rounded-lg active:bg-slate-700">
+                            清空
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* date picker */}
+                    {editSchedType === "date" && (
+                      <div className="mb-4">
+                        <div className="flex gap-2 mb-2">
+                          <input type="date"
+                            className="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500"
+                            onChange={e => { addDate(e.target.value); e.target.value = ""; }}
+                          />
+                          <span className="text-xs text-slate-500 self-center flex-shrink-0">選日期後自動加入</span>
+                        </div>
+                        {editSchedDates.length > 0 ? (
+                          <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
+                            {editSchedDates.map(d => (
+                              <span key={d}
+                                className="flex items-center gap-1 px-2 py-1 bg-indigo-500/20 border border-indigo-500/40 text-indigo-200 text-xs rounded-lg">
+                                {d}
+                                <button onClick={() => setEditSchedDates(prev => prev.filter(x=>x!==d))}
+                                  className="text-indigo-300 hover:text-white leading-none">×</button>
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-xs text-slate-600">尚未新增任何日期</p>
+                        )}
+                      </div>
+                    )}
+
+                    {/* 時間選擇 */}
+                    <p className="text-xs text-slate-400 mb-2">觸發時間</p>
+                    <div className="flex items-center gap-2 mb-4">
+                      <select value={editSchedHour} onChange={e => setEditSchedHour(parseInt(e.target.value))}
+                        className="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-indigo-500 appearance-none text-center">
+                        {Array.from({length:24},(_,i)=>i).map(h=>(
+                          <option key={h} value={h}>{String(h).padStart(2,"0")}</option>
+                        ))}
+                      </select>
+                      <span className="text-slate-400 font-bold text-lg">:</span>
+                      <select value={editSchedMin} onChange={e => setEditSchedMin(parseInt(e.target.value))}
+                        className="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-indigo-500 appearance-none text-center">
+                        {[0,5,10,15,20,25,30,35,40,45,50,55].map(m=>(
+                          <option key={m} value={m}>{String(m).padStart(2,"0")}</option>
+                        ))}
+                      </select>
+                      <span className="text-slate-300 text-sm">
+                        {String(editSchedHour).padStart(2,"0")}:{String(editSchedMin).padStart(2,"0")}
+                      </span>
+                    </div>
+
+                    <div className="bg-indigo-500/10 border border-indigo-500/20 rounded-xl px-3 py-2 mb-4">
+                      <p className="text-[11px] text-indigo-300">
+                        📡 排程設定將透過 MQTT 傳送至 ESP32 並存入 NVS。
+                        App 關閉後，ESP32 仍會在設定時間自動觸發繼電器。
+                      </p>
+                    </div>
+                  </>
+                )}
+
+                {/* 按鈕列 */}
+                <div className="flex gap-2 pt-1">
+                  {existingCfg?.active && (
+                    <button onClick={() => { saveTimerConfig(action, null); setShowTimerModal(null); }}
+                      className="flex-1 py-2.5 rounded-xl bg-red-500/15 border border-red-500/40 text-red-400 text-sm active:bg-red-500/25">
+                      停用
+                    </button>
+                  )}
+                  <button onClick={() => setShowTimerModal(null)}
+                    className="flex-1 py-2.5 rounded-xl border border-slate-600 text-slate-300 text-sm active:bg-slate-800">
+                    取消
+                  </button>
+                  <button
+                    disabled={editTimerMode==="schedule" && editSchedType==="weekday" && editSchedDays.length===0
+                           || editTimerMode==="schedule" && editSchedType==="date"    && editSchedDates.length===0}
+                    onClick={() => { saveTimerConfig(action, buildCfg()); setShowTimerModal(null); }}
+                    className="flex-1 py-2.5 rounded-xl bg-yellow-500 text-slate-900 text-sm font-bold active:bg-yellow-400 disabled:opacity-40 disabled:cursor-not-allowed">
+                    啟用
+                  </button>
+                </div>
+              </div>
+            </div>
+          </PortalModal>
+        );
+      })()}
+
       {/* ══ Toast 觸發提示 ══ */}
       {toastMsg && (
         <PortalModal>
@@ -1946,6 +2472,14 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
             @keyframes toastIn {
               from { opacity: 0; transform: translate(-50%, 16px); }
               to   { opacity: 1; transform: translate(-50%, 0); }
+            }
+            @keyframes timerPulse {
+              0%,100% { filter: brightness(1); }
+              50%      { filter: brightness(1.35); }
+            }
+            @keyframes schedPulse {
+              0%,100% { filter: brightness(1); }
+              50%      { filter: brightness(1.25); }
             }
           `}</style>
         </PortalModal>
