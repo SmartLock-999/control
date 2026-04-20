@@ -233,6 +233,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const timerStorageKey = useCallback((dev: DeviceCredential | null) =>
     dev ? `btnTimers_${dev.id}` : "btnTimers_nodev"
   , []);
+  const lastSelectedDeviceKey = useCallback((userEmail: string) => `last_selected_device_${userEmail}`, []);
 
   const [timerConfigs, setTimerConfigs] = useState<Record<string, TimerCfg>>(() => {
     // 初始載入：等待 selectedDevice 確定後由 useEffect 重載，先給空物件
@@ -256,6 +257,10 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const selectedDeviceRef = React.useRef<DeviceCredential | null>(null);
   const mqttListRef       = React.useRef<Record<number, string>>({});
   const btnLabelsRef      = React.useRef<Record<string, string>>({});
+  const setActiveDevice = useCallback((device: DeviceCredential | null) => {
+    selectedDeviceRef.current = device;
+    setSelectedDevice(device);
+  }, []);
 
   const isOwnDevice    = !!(selectedDevice && !selectedDevice.share_from);
   // count 本身就代表剩餘次數（每次分享 -1）
@@ -328,7 +333,6 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       }
 
       setDevices(mapped);
-      if (mapped.length && !selectedDevice) setSelectedDevice(mapped[0]);
 
       // 5. 兩路掃描 notify，建立 NotifyItem 清單
       //    路一：主帳號 owner row（share_from IS NULL）的 notify 有值
@@ -388,10 +392,58 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
   useEffect(() => { fetchDevices(); }, [fetchDevices]);
 
+  useEffect(() => {
+    if (!devices.length) {
+      setSelectedDevice(null);
+      return;
+    }
+    const storedId = (() => {
+      try { return localStorage.getItem(lastSelectedDeviceKey(email)) || ""; }
+      catch { return ""; }
+    })();
+    const currentId = selectedDevice?.id ?? "";
+    const next =
+      (currentId ? devices.find((d) => d.id === currentId) : null)
+      || (storedId ? devices.find((d) => d.id === storedId) : null)
+      || devices[0]
+      || null;
+    if (!next) return;
+    if (next.id !== currentId) setActiveDevice(next);
+  }, [devices, email, lastSelectedDeviceKey, setActiveDevice]);
+
+  useEffect(() => {
+    const id = selectedDevice?.id;
+    try {
+      if (id) localStorage.setItem(lastSelectedDeviceKey(email), id);
+      else localStorage.removeItem(lastSelectedDeviceKey(email));
+    } catch {}
+  }, [email, lastSelectedDeviceKey, selectedDevice?.id]);
+
   /* ── refs 同步（讓 timer callback 永遠讀到最新值）── */
   useEffect(() => { selectedDeviceRef.current = selectedDevice; }, [selectedDevice]);
   useEffect(() => { mqttListRef.current = mqttList; },           [mqttList]);
   useEffect(() => { btnLabelsRef.current = btnLabels; },         [btnLabels]);
+
+  const fireActionViaRef = useCallback((action: string) => {
+    const device = selectedDeviceRef.current;
+    const list   = mqttListRef.current;
+    if (!device?.mqtt_user || !device?.device_name) return;
+    const brokerUrl = getBrokerUrl(device, list);
+    if (!brokerUrl) return;
+    const no = (device.server_no != null && device.server_no > 0) ? device.server_no : 1;
+    const client = mqttClientsRef.current[no];
+    if (!client?.connected) return;
+    const pin   = action === "open" ? "D4" : action === "stop" ? "D18" : "D19";
+    const topic = `device/${device.mqtt_user}/${device.device_name}/command`;
+    client.publish(topic, JSON.stringify({ action, pin, ts: Math.floor(Date.now() / 1000) }), { qos: 1 });
+    setTriggeredAction(action);
+    setTimeout(() => setTriggeredAction(null), 1200);
+    if (navigator.vibrate) navigator.vibrate([40, 30, 40]);
+    const defaultLabels: Record<string, string> = { open: "開", stop: "停", down: "關" };
+    const label = btnLabelsRef.current[action] || defaultLabels[action] || action;
+    setToastMsg(`已觸發「${label}」`);
+    setTimeout(() => setToastMsg(null), 2500);
+  }, []);
 
   // ── 單一 action 的計時器啟動 / 停止（不影響其他 action）──
   const startPeriodicForAction = useCallback((action: string, intervalSec: number) => {
@@ -431,18 +483,28 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   /* ── selectedDevice 切換時：重載該設備的計時器設定 ── */
   useEffect(() => {
     stopAllPeriodics();
+    setShowBtnMenu(null);
+    setShowTimerModal(null);
+    setEditingBtn(null);
+    if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
+
+    if (selectedDevice?.share_from) {
+      setTimerConfigs({});
+      setPeriodicCountdowns({});
+      return;
+    }
+
     const key = timerStorageKey(selectedDevice);
     let configs: Record<string, TimerCfg> = {};
     try { configs = JSON.parse(localStorage.getItem(key) || "{}"); } catch {}
     setTimerConfigs(configs);
-    // 啟動此設備已設定的 periodic
     Object.entries(configs).forEach(([action, cfg]) => {
       if (cfg.active && cfg.mode === "periodic" && (cfg.intervalSec ?? 0) >= 60) {
         startPeriodicForAction(action, cfg.intervalSec!);
       }
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedDevice?.id]);
+  }, [selectedDevice?.id, selectedDevice?.share_from]);
 
   /* ── 登入後從 locations 資料表讀取已儲存的定位點 ── */
   useEffect(() => {
@@ -636,7 +698,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
             topic === `device/${d.mqtt_user}/${d.device_name}/status` ||
             topic.startsWith(`device/${d.mqtt_user}/${d.device_name}/`)
           );
-          if (dev) {
+          if (dev && !dev.share_from) {
             const storageKey = `btnTimers_${dev.id}`;
             let stored: Record<string, TimerCfg> = {};
             try { stored = JSON.parse(localStorage.getItem(storageKey) || "{}"); } catch {}
@@ -662,7 +724,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           const dev = devs.find(d =>
             topic.startsWith(`device/${d.mqtt_user}/${d.device_name}/`)
           );
-          if (dev) {
+          if (dev && !dev.share_from) {
             const storageKey = `btnTimers_${dev.id}`;
             let stored: Record<string, TimerCfg> = {};
             try { stored = JSON.parse(localStorage.getItem(storageKey) || "{}"); } catch {}
@@ -749,28 +811,6 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     finally { setResetting(false); }
   };
 
-  /* ── MQTT 發送（ref-safe，可在 setInterval/setTimeout 裡安全呼叫）── */
-  const fireActionViaRef = useCallback((action: string) => {
-    const device = selectedDeviceRef.current;
-    const list   = mqttListRef.current;
-    if (!device?.mqtt_user || !device?.device_name) return;
-    const brokerUrl = getBrokerUrl(device, list);
-    if (!brokerUrl) return;
-    const no = (device.server_no != null && device.server_no > 0) ? device.server_no : 1;
-    const client = mqttClientsRef.current[no];
-    if (!client?.connected) return;
-    const pin   = action === "open" ? "D4" : action === "stop" ? "D18" : "D19";
-    const topic = `device/${device.mqtt_user}/${device.device_name}/command`;
-    client.publish(topic, JSON.stringify({ action, pin, ts: Math.floor(Date.now() / 1000) }), { qos: 1 });
-    setTriggeredAction(action);
-    setTimeout(() => setTriggeredAction(null), 1200);
-    if (navigator.vibrate) navigator.vibrate([40, 30, 40]);
-    const defaultLabels: Record<string, string> = { open: "開", stop: "停", down: "關" };
-    const label = btnLabelsRef.current[action] || defaultLabels[action] || action;
-    setToastMsg(`已觸發「${label}」`);
-    setTimeout(() => setToastMsg(null), 2500);
-  }, []);
-
   /* ── 按鈕點擊：periodic/schedule 模式下直接手動觸發，其餘由 ESP32 排程執行 ── */
   const handleBtnClick = useCallback((action: string) => {
     handleControl(action);
@@ -812,6 +852,12 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
   /* ── 存定時設定（localStorage 設備專屬 + 精準管理此 action 計時器）── */
   const saveTimerConfig = useCallback((action: string, cfg: TimerCfg | null) => {
+    const dev = selectedDeviceRef.current;
+    if (dev?.share_from) {
+      setToastMsg("共享設備不可設定循環/定時觸發");
+      setTimeout(() => setToastMsg(null), 2500);
+      return;
+    }
     const key = timerStorageKey(selectedDeviceRef.current);
     setTimerConfigs(prev => {
       const updated = { ...prev };
@@ -830,21 +876,25 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
   /* ── 控制 ── */
   const handleControl = (action: string) => {
-    if (!selectedDevice?.mqtt_user || !selectedDevice?.device_name) { alert("請先選擇設備"); return; }
-    const brokerUrl = getBrokerUrl(selectedDevice, mqttList);
+    const device = selectedDeviceRef.current ?? selectedDevice ?? devices[0] ?? null;
+    if (!device?.mqtt_user || !device?.device_name) { return; }
+    if (selectedDeviceRef.current?.id !== device.id || selectedDevice?.id !== device.id) {
+      setActiveDevice(device);
+    }
+    const brokerUrl = getBrokerUrl(device, mqttList);
     if (!brokerUrl) {
-      alert(`設備「${displayName(selectedDevice)}」的伺服器（server_no=${selectedDevice.server_no ?? 1}）URL 未設定，請確認 mqtt_servers 資料表`);
+      alert(`設備「${displayName(device)}」的伺服器（server_no=${device.server_no ?? 1}）URL 未設定，請確認 mqtt_servers 資料表`);
       return;
     }
-    const no = (selectedDevice.server_no != null && selectedDevice.server_no > 0)
-      ? selectedDevice.server_no : 1;
+    const no = (device.server_no != null && device.server_no > 0)
+      ? device.server_no : 1;
     const client = mqttClientsRef.current[no];
     if (!client || !client.connected) {
       alert("伺服器尚未連線，請稍候再試");
       return;
     }
     const pin = action === "open" ? "D4" : action === "stop" ? "D18" : "D19";
-    const topic = `device/${selectedDevice.mqtt_user}/${selectedDevice.device_name}/command`;
+    const topic = `device/${device.mqtt_user}/${device.device_name}/command`;
     const payload = JSON.stringify({ action, pin, ts: Math.floor(Date.now() / 1000) });
     client.publish(topic, payload, { qos: 1 });
     // 按壓動畫
@@ -1435,7 +1485,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                 <div className="relative flex-1 min-w-0">
                   <select
                     value={selectedDevice?.id ?? ""}
-                    onChange={(e) => setSelectedDevice(devices.find((d) => d.id === e.target.value) ?? null)}
+                    onChange={(e) => setActiveDevice(devices.find((d) => d.id === e.target.value) ?? null)}
                     className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 appearance-none focus:outline-none focus:border-blue-500 pr-6"
                   >
                     {devices.length === 0 && <option value="">無設備</option>}
@@ -2221,6 +2271,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         const btnLabel = btnLabels[action] || defaultLabels[action] || action;
         const cfg = timerConfigs[action];
         const hasCfg = cfg?.active;
+        const isSharedDevice = !!selectedDevice?.share_from;
         const modeLabel = cfg?.mode === "schedule" ? "排程觸發" : "定期觸發";
         const fmtSec = (s: number) =>
           s >= 3600 ? `${Math.floor(s/3600)}h${Math.floor((s%3600)/60)}m`
@@ -2262,32 +2313,45 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                     </div>
                   </button>
                   {/* 定時設定 */}
-                  <button onClick={() => {
-                    // 初始化 modal 編輯狀態
-                    setEditTimerMode(cfg?.mode ?? "periodic");
-                    setEditTimerSec(cfg?.intervalSec ?? 60);
-                    if (cfg?.mode === "schedule" && cfg.schedule) {
-                      setEditSchedType(cfg.schedule.type);
-                      setEditSchedHour(cfg.schedule.hour);
-                      setEditSchedMin(cfg.schedule.minute);
-                      if (cfg.schedule.type === "weekday") {
-                        const mask = cfg.schedule.weekMask ?? 31;
-                        setEditSchedDays([1,2,3,4,5,6,7].filter(d => mask & (1<<(d-1))));
-                        setEditSchedDates([]);
-                      } else {
-                        setEditSchedDays([]);
-                        setEditSchedDates(cfg.schedule.dates ?? []);
+                  <button
+                    disabled={isSharedDevice}
+                    onClick={() => {
+                      if (isSharedDevice) {
+                        setShowBtnMenu(null);
+                        setToastMsg("共享設備不可設定循環/定時觸發");
+                        setTimeout(() => setToastMsg(null), 2500);
+                        return;
                       }
-                    } else {
-                      setEditSchedType("weekday");
-                      setEditSchedDays([1,2,3,4,5]);
-                      setEditSchedDates([]);
-                      setEditSchedHour(8);
-                      setEditSchedMin(0);
-                    }
-                    setShowTimerModal(action);
-                    setShowBtnMenu(null);
-                  }} className="w-full flex items-center gap-3 px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl active:bg-slate-700 text-left">
+                      setEditTimerMode(cfg?.mode ?? "periodic");
+                      setEditTimerSec(cfg?.intervalSec ?? 60);
+                      if (cfg?.mode === "schedule" && cfg.schedule) {
+                        setEditSchedType(cfg.schedule.type);
+                        setEditSchedHour(cfg.schedule.hour);
+                        setEditSchedMin(cfg.schedule.minute);
+                        if (cfg.schedule.type === "weekday") {
+                          const mask = cfg.schedule.weekMask ?? 31;
+                          setEditSchedDays([1,2,3,4,5,6,7].filter(d => mask & (1<<(d-1))));
+                          setEditSchedDates([]);
+                        } else {
+                          setEditSchedDays([]);
+                          setEditSchedDates(cfg.schedule.dates ?? []);
+                        }
+                      } else {
+                        setEditSchedType("weekday");
+                        setEditSchedDays([1,2,3,4,5]);
+                        setEditSchedDates([]);
+                        setEditSchedHour(8);
+                        setEditSchedMin(0);
+                      }
+                      setShowTimerModal(action);
+                      setShowBtnMenu(null);
+                    }}
+                    className={`w-full flex items-center gap-3 px-4 py-3 border rounded-xl text-left ${
+                      isSharedDevice
+                        ? "bg-slate-800/50 border-slate-800 text-slate-600"
+                        : "bg-slate-800 border-slate-700 active:bg-slate-700"
+                    }`}
+                  >
                     <Clock className="w-4 h-4 text-yellow-400 flex-shrink-0" />
                     <div className="flex-1">
                       <p className="text-sm text-slate-200">定時觸發設定</p>
@@ -2298,7 +2362,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                     )}
                   </button>
                   {/* 快速停用（已啟用時顯示）*/}
-                  {hasCfg && (
+                  {hasCfg && !isSharedDevice && (
                     <button onClick={() => { saveTimerConfig(action, null); setShowBtnMenu(null); }}
                       className="w-full flex items-center gap-3 px-4 py-3 bg-slate-800 border border-red-500/30 rounded-xl active:bg-red-500/10 text-left">
                       <X className="w-4 h-4 text-red-400 flex-shrink-0" />
