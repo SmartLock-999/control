@@ -428,10 +428,10 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     const device = selectedDeviceRef.current;
     const list   = mqttListRef.current;
     if (!device?.mqtt_user || !device?.device_name) return;
-    const brokerUrl = getBrokerUrl(device, list);
-    if (!brokerUrl) return;
     const no = (device.server_no != null && device.server_no > 0) ? device.server_no : 1;
     const client = mqttClientsRef.current[no];
+    const brokerUrl = getBrokerUrl(device, list);
+    if (!client?.connected && !brokerUrl) return;
     if (!client?.connected) return;
     const pin   = action === "open" ? "D4" : action === "stop" ? "D18" : "D19";
     const topic = `device/${device.mqtt_user}/${device.device_name}/command`;
@@ -822,10 +822,10 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     const dev  = selectedDeviceRef.current;
     const list = mqttListRef.current;
     if (!dev?.mqtt_user || !dev?.device_name) return;
-    const brokerUrl = getBrokerUrl(dev, list);
-    if (!brokerUrl) return;
     const no     = (dev.server_no != null && dev.server_no > 0) ? dev.server_no : 1;
     const client = mqttClientsRef.current[no];
+    const brokerUrl = getBrokerUrl(dev, list);
+    if (!client?.connected && !brokerUrl) return;
     if (!client?.connected) return;
     const cfgTopic = `device/${dev.mqtt_user}/${dev.device_name}/config`;
 
@@ -881,14 +881,14 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     if (selectedDeviceRef.current?.id !== device.id || selectedDevice?.id !== device.id) {
       setActiveDevice(device);
     }
-    const brokerUrl = getBrokerUrl(device, mqttList);
-    if (!brokerUrl) {
-      alert(`設備「${displayName(device)}」的伺服器（server_no=${device.server_no ?? 1}）URL 未設定，請確認 mqtt_servers 資料表`);
-      return;
-    }
     const no = (device.server_no != null && device.server_no > 0)
       ? device.server_no : 1;
     const client = mqttClientsRef.current[no];
+    const brokerUrl = getBrokerUrl(device, mqttList);
+    if (!client?.connected && !brokerUrl) {
+      alert(`設備「${displayName(device)}」的伺服器（server_no=${device.server_no ?? 1}）URL 未設定，請確認 mqtt_list 資料表`);
+      return;
+    }
     if (!client || !client.connected) {
       alert("伺服器尚未連線，請稍候再試");
       return;
