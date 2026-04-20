@@ -393,6 +393,27 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   useEffect(() => { mqttListRef.current = mqttList; },           [mqttList]);
   useEffect(() => { btnLabelsRef.current = btnLabels; },         [btnLabels]);
 
+  const fireActionViaRef = useCallback((action: string) => {
+    const device = selectedDeviceRef.current;
+    const list   = mqttListRef.current;
+    if (!device?.mqtt_user || !device?.device_name) return;
+    const brokerUrl = getBrokerUrl(device, list);
+    if (!brokerUrl) return;
+    const no = (device.server_no != null && device.server_no > 0) ? device.server_no : 1;
+    const client = mqttClientsRef.current[no];
+    if (!client?.connected) return;
+    const pin   = action === "open" ? "D4" : action === "stop" ? "D18" : "D19";
+    const topic = `device/${device.mqtt_user}/${device.device_name}/command`;
+    client.publish(topic, JSON.stringify({ action, pin, ts: Math.floor(Date.now() / 1000) }), { qos: 1 });
+    setTriggeredAction(action);
+    setTimeout(() => setTriggeredAction(null), 1200);
+    if (navigator.vibrate) navigator.vibrate([40, 30, 40]);
+    const defaultLabels: Record<string, string> = { open: "開", stop: "停", down: "關" };
+    const label = btnLabelsRef.current[action] || defaultLabels[action] || action;
+    setToastMsg(`已觸發「${label}」`);
+    setTimeout(() => setToastMsg(null), 2500);
+  }, []);
+
   // ── 單一 action 的計時器啟動 / 停止（不影響其他 action）──
   const startPeriodicForAction = useCallback((action: string, intervalSec: number) => {
     // 只清除此 action，不動其他
@@ -748,28 +769,6 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     } catch { alert("重置失敗"); }
     finally { setResetting(false); }
   };
-
-  /* ── MQTT 發送（ref-safe，可在 setInterval/setTimeout 裡安全呼叫）── */
-  const fireActionViaRef = useCallback((action: string) => {
-    const device = selectedDeviceRef.current;
-    const list   = mqttListRef.current;
-    if (!device?.mqtt_user || !device?.device_name) return;
-    const brokerUrl = getBrokerUrl(device, list);
-    if (!brokerUrl) return;
-    const no = (device.server_no != null && device.server_no > 0) ? device.server_no : 1;
-    const client = mqttClientsRef.current[no];
-    if (!client?.connected) return;
-    const pin   = action === "open" ? "D4" : action === "stop" ? "D18" : "D19";
-    const topic = `device/${device.mqtt_user}/${device.device_name}/command`;
-    client.publish(topic, JSON.stringify({ action, pin, ts: Math.floor(Date.now() / 1000) }), { qos: 1 });
-    setTriggeredAction(action);
-    setTimeout(() => setTriggeredAction(null), 1200);
-    if (navigator.vibrate) navigator.vibrate([40, 30, 40]);
-    const defaultLabels: Record<string, string> = { open: "開", stop: "停", down: "關" };
-    const label = btnLabelsRef.current[action] || defaultLabels[action] || action;
-    setToastMsg(`已觸發「${label}」`);
-    setTimeout(() => setToastMsg(null), 2500);
-  }, []);
 
   /* ── 按鈕點擊：periodic/schedule 模式下直接手動觸發，其餘由 ESP32 排程執行 ── */
   const handleBtnClick = useCallback((action: string) => {
