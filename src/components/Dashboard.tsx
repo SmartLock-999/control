@@ -708,10 +708,11 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
           (parsed.periodics as any[]).forEach((p: any) => {
             const a: string = p.target;
-            if (p.active && Number.isFinite(p.intervalSec) && p.intervalSec > 0) {
+            const intervalSec = Math.floor(Number(p.intervalSec));
+            if (p.active && Number.isFinite(intervalSec) && intervalSec > 0) {
               stored[a] = {
                 mode: "periodic",
-                intervalSec: p.intervalSec,
+                intervalSec,
                 periodicStartedAt: stored[a]?.mode === "periodic" ? stored[a].periodicStartedAt : Date.now(),
                 active: true,
               };
