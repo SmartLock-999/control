@@ -93,7 +93,7 @@ interface SchedDef {
 }
 interface TimerCfg {
   mode: "periodic" | "schedule";
-  intervalSec?: number;   // periodic 用，允許自訂正整數秒數
+  intervalSec?: number;   // periodic 用，允許自訂大於 1 的整數秒數
   periodicStartedAt?: number; // periodic 開始時間（ms）
   schedule?: SchedDef;    // schedule 用（送到 ESP32）
   active: boolean;
@@ -709,7 +709,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           (parsed.periodics as any[]).forEach((p: any) => {
             const a: string = p.target;
             const intervalSec = Math.floor(Number(p.intervalSec));
-            if (p.active && Number.isFinite(intervalSec) && intervalSec > 0) {
+            if (p.active && Number.isFinite(intervalSec) && intervalSec > 1) {
               stored[a] = {
                 mode: "periodic",
                 intervalSec,
@@ -865,7 +865,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       return;
     }
     if (cfg.mode === "periodic") {
-      const intervalSec = Math.max(1, Math.floor(cfg.intervalSec ?? 60));
+      const intervalSec = Math.max(2, Math.floor(cfg.intervalSec ?? 60));
       client.publish(cfgTopic, JSON.stringify({ action: "set_periodic", target: action, active: true, intervalSec }), { qos: 1 });
       setTimeout(() => client.publish(cfgTopic, JSON.stringify({ action: "set_schedule", target: action, active: false }), { qos: 1 }), 200);
       return;
@@ -2410,12 +2410,14 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         const defaultLabels: Record<string,string> = { open:"開", stop:"停", down:"關" };
         const btnLabel    = btnLabels[action] || defaultLabels[action] || action;
         const existingCfg = timerConfigs[action];
-        const safeSec     = Math.max(1, Math.floor(editTimerSec || 0));
+        const safeSec     = Math.max(2, Math.floor(editTimerSec || 0));
         const fmtSec = (s: number) =>
           s >= 3600 ? `${Math.floor(s/3600)} 小時 ${Math.floor((s%3600)/60)} 分鐘`
           : s >= 60 ? `${Math.floor(s/60)} 分鐘${s%60>0?` ${s%60} 秒`:""}`
           : `${s} 秒`;
         const DAY_NAMES = ["一","二","三","四","五","六","日"];
+        const adjustEditTimerSec = (delta: number) =>
+          setEditTimerSec(prev => Math.max(2, Math.floor((prev || 2) + delta)));
 
         const toggleDay = (d: number) =>
           setEditSchedDays(prev => prev.includes(d) ? prev.filter(x=>x!==d) : [...prev,d].sort());
@@ -2484,12 +2486,28 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                 {/* ── periodic ── */}
                 {editTimerMode === "periodic" && (
                   <>
-                    <p className="text-xs text-slate-400 mb-1.5">觸發間隔（秒）</p>
-                    <input type="number" min={1}
-                      value={editTimerSec}
-                      onChange={e => setEditTimerSec(Math.max(1, parseInt(e.target.value, 10) || 1))}
-                      className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white text-sm focus:outline-none focus:border-yellow-500 mb-1.5"
-                    />
+                    <p className="text-xs text-slate-400 mb-1.5">觸發間隔（秒，需大於 1）</p>
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <button
+                        type="button"
+                        onClick={() => adjustEditTimerSec(-1)}
+                        className="px-3 py-3 rounded-xl border border-slate-700 bg-slate-800 text-slate-200 text-sm font-bold active:bg-slate-700"
+                      >
+                        -1 秒
+                      </button>
+                      <input type="number" min={2} step={1}
+                        value={editTimerSec}
+                        onChange={e => setEditTimerSec(Math.max(2, parseInt(e.target.value, 10) || 2))}
+                        className="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white text-sm text-center focus:outline-none focus:border-yellow-500"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => adjustEditTimerSec(1)}
+                        className="px-3 py-3 rounded-xl border border-slate-700 bg-slate-800 text-slate-200 text-sm font-bold active:bg-slate-700"
+                      >
+                        +1 秒
+                      </button>
+                    </div>
                     <p className="text-xs text-yellow-400/80 mb-3">→ {fmtSec(safeSec)}</p>
                     <div className="flex gap-1.5 flex-wrap mb-2">
                       {[60,120,300,600,1800,3600].map(s => (
