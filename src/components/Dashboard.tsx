@@ -437,9 +437,27 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
 
     if (selectedDevice?.share_from) {
-      // 分享設備：清空後向 ESP32 請求最新設定，由 MQTT message handler 回填
-      setTimerConfigs({});
+      // 分享設備：先從對應的 owner row localStorage 讀取排程（避免畫面閃空）
+      // owner row 與此分享設備同 mqtt_user + device_name，但 share_from IS NULL
       const dev = selectedDevice;
+      const ownerRow = devices.find(
+        d => !d.share_from &&
+             d.mqtt_user === dev.mqtt_user &&
+             d.device_name === dev.device_name
+      );
+      if (ownerRow) {
+        // owner row 的 localStorage 已有排程設定，直接顯示（常駐）
+        let ownerConfigs: Record<string, TimerCfg> = {};
+        try { ownerConfigs = JSON.parse(localStorage.getItem(`btnTimers_${ownerRow.id}`) || "{}"); } catch {}
+        setTimerConfigs(ownerConfigs);
+      } else {
+        // owner row 不在本帳號下（純被分享者），從臨時 key 讀取前次 ESP32 回報的設定
+        let tmpConfigs: Record<string, TimerCfg> = {};
+        try { tmpConfigs = JSON.parse(localStorage.getItem(`btnTimers_tmp_${dev.mqtt_user}_${dev.device_name}`) || "{}"); } catch {}
+        if (Object.keys(tmpConfigs).length > 0) setTimerConfigs(tmpConfigs);
+        // 若臨時 key 也沒資料，保持現有 state 不清空，等 ESP32 回報
+      }
+      // 向 ESP32 請求最新設定，回報後由 MQTT message handler 更新（不清空 state，避免閃爍）
       const no = (dev.server_no != null && dev.server_no > 0) ? dev.server_no : 1;
       const client = mqttClientsRef.current[no];
       if (client?.connected && dev.mqtt_user && dev.device_name) {
@@ -457,7 +475,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     try { configs = JSON.parse(localStorage.getItem(key) || "{}"); } catch {}
     setTimerConfigs(configs);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedDevice?.id, selectedDevice?.share_from]);
+  }, [selectedDevice?.id, selectedDevice?.share_from, devices]);
 
   /* ── 登入後從 locations 資料表讀取已儲存的定位點 ── */
   useEffect(() => {
@@ -677,6 +695,15 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           let stored: Record<string, TimerCfg> = {};
           if (ownerDev) {
             try { stored = JSON.parse(localStorage.getItem(`btnTimers_${ownerDev.id}`) || "{}"); } catch {}
+          } else {
+            // 純被分享者：以目前顯示中的 timerConfigs 為基底，避免其他類型設定被清掉
+            try { stored = JSON.parse(JSON.stringify(
+              selectedDeviceRef.current && matchedDevs.some(d => d.id === selectedDeviceRef.current?.id)
+                ? Object.fromEntries(Object.entries(
+                    JSON.parse(localStorage.getItem(`btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`) || "{}") as [string, TimerCfg][]
+                  ))
+                : {}
+            )); } catch {}
           }
 
           (parsed.periodics as any[]).forEach((p: any) => {
@@ -695,6 +722,9 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
           if (ownerDev) {
             try { localStorage.setItem(`btnTimers_${ownerDev.id}`, JSON.stringify(stored)); } catch {}
+          } else {
+            // 純被分享者：暫存到臨時 key（以 mqtt_user+device_name 識別）
+            try { localStorage.setItem(`btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`, JSON.stringify(stored)); } catch {}
           }
 
           // 目前選中的設備屬於同一實體設備（owner 或 share row）→ 更新顯示
@@ -717,6 +747,9 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           let stored: Record<string, TimerCfg> = {};
           if (ownerDev) {
             try { stored = JSON.parse(localStorage.getItem(`btnTimers_${ownerDev.id}`) || "{}"); } catch {}
+          } else {
+            // 純被分享者：從臨時 key 讀取（含先前 periodic_cfg 合併的結果）
+            try { stored = JSON.parse(localStorage.getItem(`btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`) || "{}"); } catch {}
           }
 
           (parsed.schedules as any[]).forEach((s: any) => {
@@ -738,6 +771,9 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
           if (ownerDev) {
             try { localStorage.setItem(`btnTimers_${ownerDev.id}`, JSON.stringify(stored)); } catch {}
+          } else {
+            // 純被分享者：同步更新臨時 key
+            try { localStorage.setItem(`btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`, JSON.stringify(stored)); } catch {}
           }
 
           // 目前選中的設備屬於同一實體設備（owner 或 share row）→ 更新顯示
@@ -746,8 +782,6 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           }
           return;
         }
-
-        // ── 設備在線狀態 ──
         const action = parsed?.action ?? text;
         const online = String(action).toLowerCase() !== "offline"
                     && String(action).toLowerCase() !== "disconnected";
