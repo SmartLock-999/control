@@ -437,7 +437,18 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
 
     if (selectedDevice?.share_from) {
+      // 分享設備：清空後向 ESP32 請求最新設定，由 MQTT message handler 回填
       setTimerConfigs({});
+      const dev = selectedDevice;
+      const no = (dev.server_no != null && dev.server_no > 0) ? dev.server_no : 1;
+      const client = mqttClientsRef.current[no];
+      if (client?.connected && dev.mqtt_user && dev.device_name) {
+        const cfgTopic = `device/${dev.mqtt_user}/${dev.device_name}/config`;
+        client.publish(cfgTopic, JSON.stringify({ action: "get_periodic" }), { qos: 1 });
+        setTimeout(() => {
+          client.publish(cfgTopic, JSON.stringify({ action: "get_schedule" }), { qos: 1 });
+        }, 200);
+      }
       return;
     }
 
@@ -612,14 +623,33 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         if (!isActive) return;
         setServerStatusMap((prev) => ({ ...prev, [no]: "Online" }));
 
-        const topics = devs
+        // status 訂閱（逐設備 row，含 share row）
+        const statusTopics = devs
           .filter((d) => d.mqtt_user && d.device_name)
           .map((d) => `device/${d.mqtt_user}/${d.device_name}/status`);
-        if (topics.length) client.subscribe(topics, { qos: 0 });
 
-        // 連線後查詢 ESP32 目前的循環 + 排程設定（只查 owner 設備）
+        // cfg_report 訂閱：ESP32 主動回報設定時使用，依實體設備去重
+        const cfgReportTopics: string[] = [];
+        const seenCfg = new Set<string>();
+        devs.filter(d => d.mqtt_user && d.device_name).forEach(d => {
+          const k = `${d.mqtt_user}|${d.device_name}`;
+          if (!seenCfg.has(k)) {
+            seenCfg.add(k);
+            cfgReportTopics.push(`device/${d.mqtt_user}/${d.device_name}/cfg_report`);
+          }
+        });
+
+        const allTopics = [...statusTopics, ...cfgReportTopics];
+        if (allTopics.length) client.subscribe(allTopics, { qos: 0 });
+
+        // 連線後查詢 ESP32 目前的循環 + 排程設定
+        // 依實體設備（mqtt_user + device_name）去重，owner / share row 共用同一台設備
         setTimeout(() => {
-          devs.filter(d => d.mqtt_user && d.device_name && !d.share_from).forEach(d => {
+          const seen = new Set<string>();
+          devs.filter(d => d.mqtt_user && d.device_name).forEach(d => {
+            const key = `${d.mqtt_user}|${d.device_name}`;
+            if (seen.has(key)) return;
+            seen.add(key);
             const cfgTopic = `device/${d.mqtt_user}/${d.device_name}/config`;
             client.publish(cfgTopic, JSON.stringify({ action: "get_periodic" }), { qos: 1 });
             client.publish(cfgTopic, JSON.stringify({ action: "get_schedule" }), { qos: 1 });
@@ -635,66 +665,84 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
         // ── ESP32 回報循環設定（periodic_cfg）→ 同步 state + localStorage ──
         if (parsed?.type === "periodic_cfg" && Array.isArray(parsed.periodics)) {
-          // 找到對應這個 topic 的設備
-          const dev = devs.find(d =>
-            topic === `device/${d.mqtt_user}/${d.device_name}/status` ||
+          // 找到所有符合此 topic 的設備（owner row + share row 都要）
+          const matchedDevs = devs.filter(d =>
+            d.mqtt_user && d.device_name &&
             topic.startsWith(`device/${d.mqtt_user}/${d.device_name}/`)
           );
-          if (dev && !dev.share_from) {
-            const storageKey = `btnTimers_${dev.id}`;
-            let stored: Record<string, TimerCfg> = {};
-            try { stored = JSON.parse(localStorage.getItem(storageKey) || "{}"); } catch {}
-            (parsed.periodics as any[]).forEach((p: any) => {
-              const a: string = p.target;
-              if (p.active && p.intervalSec >= 60) {
-                stored[a] = {
-                  mode: "periodic",
-                  intervalSec: p.intervalSec,
-                  periodicStartedAt: stored[a]?.mode === "periodic" ? stored[a].periodicStartedAt : Date.now(),
-                  active: true,
-                };
-              } else {
-                if (stored[a]?.mode === "periodic") delete stored[a];
-              }
-            });
-            try { localStorage.setItem(storageKey, JSON.stringify(stored)); } catch {}
-            // 只有當前選中設備才更新 state
-            if (dev.id === selectedDeviceRef.current?.id) {
-              setTimerConfigs({ ...stored });
+          if (!matchedDevs.length) return;
+
+          // localStorage 以 owner row 為基底（share row 不寫 localStorage）
+          const ownerDev = matchedDevs.find(d => !d.share_from);
+          let stored: Record<string, TimerCfg> = {};
+          if (ownerDev) {
+            try { stored = JSON.parse(localStorage.getItem(`btnTimers_${ownerDev.id}`) || "{}"); } catch {}
+          }
+
+          (parsed.periodics as any[]).forEach((p: any) => {
+            const a: string = p.target;
+            if (p.active && p.intervalSec >= 60) {
+              stored[a] = {
+                mode: "periodic",
+                intervalSec: p.intervalSec,
+                periodicStartedAt: stored[a]?.mode === "periodic" ? stored[a].periodicStartedAt : Date.now(),
+                active: true,
+              };
+            } else {
+              if (stored[a]?.mode === "periodic") delete stored[a];
             }
+          });
+
+          if (ownerDev) {
+            try { localStorage.setItem(`btnTimers_${ownerDev.id}`, JSON.stringify(stored)); } catch {}
+          }
+
+          // 目前選中的設備屬於同一實體設備（owner 或 share row）→ 更新顯示
+          if (matchedDevs.some(d => d.id === selectedDeviceRef.current?.id)) {
+            setTimerConfigs({ ...stored });
           }
           return;
         }
 
         // ── ESP32 回報排程設定（schedule_cfg）→ 同步 state + localStorage ──
         if (parsed?.type === "schedule_cfg" && Array.isArray(parsed.schedules)) {
-          const dev = devs.find(d =>
+          // 找到所有符合此 topic 的設備（owner row + share row 都要）
+          const matchedDevs = devs.filter(d =>
+            d.mqtt_user && d.device_name &&
             topic.startsWith(`device/${d.mqtt_user}/${d.device_name}/`)
           );
-          if (dev && !dev.share_from) {
-            const storageKey = `btnTimers_${dev.id}`;
-            let stored: Record<string, TimerCfg> = {};
-            try { stored = JSON.parse(localStorage.getItem(storageKey) || "{}"); } catch {}
-            (parsed.schedules as any[]).forEach((s: any) => {
-              const a: string = s.target;
-              if (s.active) {
-                stored[a] = {
-                  mode: "schedule", active: true,
-                  schedule: {
-                    type:     s.stype === 1 || s.stype === "date" ? "date" : "weekday",
-                    weekMask: s.weekMask,
-                    dates:    typeof s.dates === "string" ? s.dates.split(",").filter(Boolean) : (s.dates ?? []),
-                    hour: s.hour, minute: s.minute,
-                  },
-                };
-              } else {
-                if (stored[a]?.mode === "schedule") delete stored[a];
-              }
-            });
-            try { localStorage.setItem(storageKey, JSON.stringify(stored)); } catch {}
-            if (dev.id === selectedDeviceRef.current?.id) {
-              setTimerConfigs({ ...stored });
+          if (!matchedDevs.length) return;
+
+          const ownerDev = matchedDevs.find(d => !d.share_from);
+          let stored: Record<string, TimerCfg> = {};
+          if (ownerDev) {
+            try { stored = JSON.parse(localStorage.getItem(`btnTimers_${ownerDev.id}`) || "{}"); } catch {}
+          }
+
+          (parsed.schedules as any[]).forEach((s: any) => {
+            const a: string = s.target;
+            if (s.active) {
+              stored[a] = {
+                mode: "schedule", active: true,
+                schedule: {
+                  type:     s.stype === 1 || s.stype === "date" ? "date" : "weekday",
+                  weekMask: s.weekMask,
+                  dates:    typeof s.dates === "string" ? s.dates.split(",").filter(Boolean) : (s.dates ?? []),
+                  hour: s.hour, minute: s.minute,
+                },
+              };
+            } else {
+              if (stored[a]?.mode === "schedule") delete stored[a];
             }
+          });
+
+          if (ownerDev) {
+            try { localStorage.setItem(`btnTimers_${ownerDev.id}`, JSON.stringify(stored)); } catch {}
+          }
+
+          // 目前選中的設備屬於同一實體設備（owner 或 share row）→ 更新顯示
+          if (matchedDevs.some(d => d.id === selectedDeviceRef.current?.id)) {
+            setTimerConfigs({ ...stored });
           }
           return;
         }
@@ -1479,6 +1527,8 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                 const cfg         = timerConfigs[action];
                 const hasPeriodic = cfg?.active && cfg.mode === "periodic";
                 const hasSchedule = cfg?.active && cfg.mode === "schedule";
+                // 分享設備：排程設定來自 ESP32（唯讀顯示，用琥珀色區分）
+                const isSharedSched = !!(selectedDevice?.share_from && (hasPeriodic || hasSchedule));
 
                 const fontSize = label.length <= 2 ? "1.1rem"
                                : label.length <= 4 ? "0.88rem"
@@ -1511,11 +1561,15 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                         transition: "transform 0.1s, background-color 0.12s",
                         ...(hasPeriodic && !isPressed ? {
                           animation: "timerPulse 2.5s ease-in-out infinite",
-                          boxShadow: `0 0 12px 3px ${accent}55, inset 0 0 16px ${accent}18`,
+                          boxShadow: isSharedSched
+                            ? `0 0 12px 3px #f59e0b55, inset 0 0 16px #f59e0b18`
+                            : `0 0 12px 3px ${accent}55, inset 0 0 16px ${accent}18`,
                         } : {}),
                         ...(hasSchedule && !isPressed ? {
                           animation: "schedPulse 4s ease-in-out infinite",
-                          boxShadow: `0 0 10px 2px #818cf844, inset 0 0 14px #818cf814`,
+                          boxShadow: isSharedSched
+                            ? `0 0 10px 2px #f59e0b44, inset 0 0 14px #f59e0b14`
+                            : `0 0 10px 2px #818cf844, inset 0 0 14px #818cf814`,
                         } : {}),
                       }}
                       className={`
@@ -1530,19 +1584,25 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                     >
                       {/* 主文字 */}
                       <span>{isPressed ? "✓" : label}</span>
-                      {/* 副文字 */}
+                      {/* 副文字：分享設備顯示「主機」前綴，提示為 owner 在 ESP32 上設定的排程 */}
                       {!isPressed && (hasPeriodic || hasSchedule) && (
-                        <span className="text-[9px] font-mono opacity-60 leading-none mt-0.5">
-                          {hasPeriodic ? (periodicSubLabel ?? "") : schedSubLabel ?? ""}
+                        <span className={`text-[9px] font-mono leading-none mt-0.5 ${
+                          isSharedSched ? "text-amber-400 opacity-80" : "opacity-60"
+                        }`}>
+                          {isSharedSched
+                            ? `主機 ${hasPeriodic ? (periodicSubLabel ?? "") : (schedSubLabel ?? "")}`
+                            : hasPeriodic ? (periodicSubLabel ?? "") : (schedSubLabel ?? "")}
                         </span>
                       )}
                     </button>
-                    {/* 角標 */}
+                    {/* 角標：分享設備用琥珀色圖示，與 owner 的藍/紫色區分 */}
                     {(hasPeriodic || hasSchedule) && (
-                      <span className="absolute top-1 right-1 pointer-events-none opacity-60">
+                      <span className={`absolute top-1 right-1 pointer-events-none ${
+                        isSharedSched ? "opacity-90" : "opacity-60"
+                      }`}>
                         {hasPeriodic
-                          ? <Clock  style={{ width:10, height:10, color: accent }} />
-                          : <Timer  style={{ width:10, height:10, color:"#818cf8" }} />}
+                          ? <Clock  style={{ width:10, height:10, color: isSharedSched ? "#f59e0b" : accent }} />
+                          : <Timer  style={{ width:10, height:10, color: isSharedSched ? "#f59e0b" : "#818cf8" }} />}
                       </span>
                     )}
                   </div>
