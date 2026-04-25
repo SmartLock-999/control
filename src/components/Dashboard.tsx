@@ -2487,25 +2487,25 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                 {editTimerMode === "periodic" && (
                   <>
                     <p className="text-xs text-slate-400 mb-1.5">觸發間隔（秒，需大於 1）</p>
-                    <div className="flex items-center gap-2 mb-1.5">
+                    <div className="relative mb-1.5">
                       <button
                         type="button"
                         onClick={() => adjustEditTimerSec(-1)}
-                        className="px-3 py-3 rounded-xl border border-slate-700 bg-slate-800 text-slate-200 text-sm font-bold active:bg-slate-700"
+                        className="absolute left-1 top-1 bottom-1 w-12 rounded-lg border border-slate-700 bg-slate-800 text-slate-200 text-sm font-bold active:bg-slate-700"
                       >
-                        -1 秒
+                        -1
                       </button>
                       <input type="number" min={2} step={1}
                         value={editTimerSec}
                         onChange={e => setEditTimerSec(Math.max(2, parseInt(e.target.value, 10) || 2))}
-                        className="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white text-sm text-center focus:outline-none focus:border-yellow-500"
+                        className="w-full bg-slate-800 border border-slate-700 rounded-xl px-14 py-3 text-white text-sm text-center focus:outline-none focus:border-yellow-500"
                       />
                       <button
                         type="button"
                         onClick={() => adjustEditTimerSec(1)}
-                        className="px-3 py-3 rounded-xl border border-slate-700 bg-slate-800 text-slate-200 text-sm font-bold active:bg-slate-700"
+                        className="absolute right-1 top-1 bottom-1 w-12 rounded-lg border border-slate-700 bg-slate-800 text-slate-200 text-sm font-bold active:bg-slate-700"
                       >
-                        +1 秒
+                        +1
                       </button>
                     </div>
                     <p className="text-xs text-yellow-400/80 mb-3">→ {fmtSec(safeSec)}</p>
