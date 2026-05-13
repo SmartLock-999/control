@@ -458,10 +458,11 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         setTimerConfigs(ownerConfigs);
       } else {
         // owner row 不在本帳號下（純被分享者），從臨時 key 讀取前次 ESP32 回報的設定
+        // 無論是否有資料都必須呼叫 setTimerConfigs，確保切換設備時清除前一個設備的殘留 timer 顯示
         let tmpConfigs: Record<string, TimerCfg> = {};
         try { tmpConfigs = JSON.parse(localStorage.getItem(`btnTimers_tmp_${dev.mqtt_user}_${dev.device_name}`) || "{}"); } catch {}
-        if (Object.keys(tmpConfigs).length > 0) setTimerConfigs(tmpConfigs);
-        // 若臨時 key 也沒資料，保持現有 state 不清空，等 ESP32 回報
+        setTimerConfigs(tmpConfigs); // 若 tmpConfigs 為空物件，會清除舊設備 timer badge
+        // ESP32 回報後由 MQTT message handler 再更新
       }
       // 向 ESP32 請求最新設定，回報後由 MQTT message handler 更新（不清空 state，避免閃爍）
       const no = (dev.server_no != null && dev.server_no > 0) ? dev.server_no : 1;
