@@ -231,9 +231,13 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const timerStorageKey = useCallback((dev: DeviceCredential | null) =>
     dev ? `btnTimers_${dev.id}` : "btnTimers_nodev"
   , []);
-  const btnLabelStorageKey = useCallback((dev: DeviceCredential | null) =>
-    dev ? `btnLabels_${dev.id}` : "btnLabels_nodev"
-  , []);
+  // 按鈕名稱 key：分享設備也使用 owner 的 key（以 mqtt_user+device_name 識別，跨帳號共享同一份設定）
+  const btnLabelStorageKey = useCallback((dev: DeviceCredential | null) => {
+    if (!dev) return "btnLabels_nodev";
+    // 分享設備：改用 mqtt_user+device_name 當 key，與 owner 共用
+    if (dev.share_from) return `btnLabels_shared_${dev.mqtt_user}_${dev.device_name}`;
+    return `btnLabels_${dev.id}`;
+  }, []);
   const lastSelectedDeviceKey = useCallback((userEmail: string) =>
     `last_selected_device_${userEmail.trim().toLowerCase()}`, []);
 
@@ -255,6 +259,8 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const selectedDeviceRef = React.useRef<DeviceCredential | null>(null);
   const mqttListRef       = React.useRef<Record<number, string>>({});
   const readBtnLabelsForDevice = useCallback((dev: DeviceCredential | null): Record<string, string> => {
+    if (!dev) return {};
+    // 分享設備：先嘗試讀取 owner 同步的 key（btnLabels_shared_），再回退到舊 key
     try { return JSON.parse(localStorage.getItem(btnLabelStorageKey(dev)) || "{}"); }
     catch { return {}; }
   }, [btnLabelStorageKey]);
@@ -941,6 +947,13 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const confirmBtnRename = () => {
     if (!editingBtn) return;
     const dev = selectedDeviceRef.current;
+    // 分享設備：不允許修改按鈕名稱
+    if (dev?.share_from) {
+      setToastMsg("共享設備的按鈕名稱由主帳號設定");
+      setTimeout(() => setToastMsg(null), 2500);
+      setEditingBtn(null);
+      return;
+    }
     const defaultLabels: Record<string, string> = { open: "開", stop: "停", down: "關" };
     const trimmed = editBtnName.trim();
     const updated = { ...btnLabels };
@@ -950,7 +963,12 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       updated[editingBtn] = trimmed;
     }
     setBtnLabels(updated);
+    // 寫入 owner key
     try { localStorage.setItem(btnLabelStorageKey(dev), JSON.stringify(updated)); } catch {}
+    // 同步寫入 shared key，讓被分享者也能讀到
+    if (dev?.mqtt_user && dev?.device_name) {
+      try { localStorage.setItem(`btnLabels_shared_${dev.mqtt_user}_${dev.device_name}`, JSON.stringify(updated)); } catch {}
+    }
     setEditingBtn(null);
   };
 
@@ -1620,24 +1638,32 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                       {/* 主文字 */}
                       <span>{isPressed ? "✓" : label}</span>
                       {/* 副文字：分享設備顯示「主機」前綴，提示為 owner 在 ESP32 上設定的排程 */}
-                      {!isPressed && (hasPeriodic || hasSchedule) && (
+                      {!isPressed && hasPeriodic && (
                         <span className={`text-[9px] font-mono leading-none mt-0.5 ${
                           isSharedSched ? "text-amber-400 opacity-80" : "opacity-60"
                         }`}>
-                          {isSharedSched
-                            ? `主機 ${hasPeriodic ? (periodicSubLabel ?? "") : (schedSubLabel ?? "")}`
-                            : hasPeriodic ? (periodicSubLabel ?? "") : (schedSubLabel ?? "")}
+                          {isSharedSched ? `主機 ${periodicSubLabel ?? ""}` : (periodicSubLabel ?? "")}
+                        </span>
+                      )}
+                      {!isPressed && hasSchedule && (
+                        <span className={`text-[9px] font-mono leading-none mt-0.5 ${
+                          isSharedSched ? "text-amber-300 opacity-80" : "text-indigo-300 opacity-60"
+                        }`}>
+                          {isSharedSched ? `主機 ${schedSubLabel ?? ""}` : (schedSubLabel ?? "")}
                         </span>
                       )}
                     </button>
                     {/* 角標：分享設備用琥珀色圖示，與 owner 的藍/紫色區分 */}
                     {(hasPeriodic || hasSchedule) && (
-                      <span className={`absolute top-1 right-1 pointer-events-none ${
+                      <span className={`absolute top-1 right-1 pointer-events-none flex gap-0.5 ${
                         isSharedSched ? "opacity-90" : "opacity-60"
                       }`}>
-                        {hasPeriodic
-                          ? <Clock  style={{ width:10, height:10, color: isSharedSched ? "#f59e0b" : accent }} />
-                          : <Timer  style={{ width:10, height:10, color: isSharedSched ? "#f59e0b" : "#818cf8" }} />}
+                        {hasPeriodic && (
+                          <Clock style={{ width:10, height:10, color: isSharedSched ? "#f59e0b" : accent }} />
+                        )}
+                        {hasSchedule && (
+                          <Timer style={{ width:10, height:10, color: isSharedSched ? "#f59e0b" : "#818cf8" }} />
+                        )}
                       </span>
                     )}
                   </div>
@@ -2336,6 +2362,11 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                   {/* 改名 */}
                   <button onClick={() => {
                     setShowBtnMenu(null);
+                    if (isSharedDevice) {
+                      setToastMsg("共享設備的按鈕名稱由主帳號設定");
+                      setTimeout(() => setToastMsg(null), 2500);
+                      return;
+                    }
                     const defaultLabels2: Record<string,string> = { open:"開", stop:"停", down:"關" };
                     setEditBtnName(btnLabels[action] || defaultLabels2[action] || "");
                     setEditingBtn(action);
@@ -2343,8 +2374,11 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                     <Pencil className="w-4 h-4 text-slate-400 flex-shrink-0" />
                     <div>
                       <p className="text-sm text-slate-200">修改按鈕名稱</p>
-                      <p className="text-xs text-slate-500">目前：{btnLabel}</p>
+                      <p className="text-xs text-slate-500">
+                        {isSharedDevice ? "依循主帳號設定（唯讀）" : `目前：${btnLabel}`}
+                      </p>
                     </div>
+                    {isSharedDevice && <span className="text-[10px] bg-amber-400/20 border border-amber-400/40 text-amber-300 px-1.5 py-0.5 rounded-full flex-shrink-0">主機</span>}
                   </button>
                   {!isSharedDevice && (
                     <button
@@ -2384,6 +2418,17 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                         <span className="text-[10px] bg-yellow-400/20 border border-yellow-400/40 text-yellow-300 px-1.5 py-0.5 rounded-full">ON</span>
                       )}
                     </button>
+                  )}
+                  {/* 分享設備：顯示主機的循環/定時設定（唯讀）*/}
+                  {isSharedDevice && (
+                    <div className="w-full flex items-center gap-3 px-4 py-3 border rounded-xl text-left bg-slate-800/60 border-amber-500/30">
+                      <Clock className="w-4 h-4 text-amber-400 flex-shrink-0" />
+                      <div className="flex-1">
+                        <p className="text-sm text-amber-200">循環 / 定時設定</p>
+                        <p className="text-xs text-slate-400">{cfgSummary()}</p>
+                      </div>
+                      <span className="text-[10px] bg-amber-400/20 border border-amber-400/40 text-amber-300 px-1.5 py-0.5 rounded-full flex-shrink-0">主機唯讀</span>
+                    </div>
                   )}
                   {/* 快速停用（已啟用時顯示）*/}
                   {hasCfg && !isSharedDevice && (
