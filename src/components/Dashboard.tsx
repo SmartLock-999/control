@@ -480,6 +480,9 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         setTimeout(() => {
           client.publish(cfgTopic, JSON.stringify({ action: "get_schedule" }), { qos: 1 });
         }, 200);
+        setTimeout(() => {
+          client.publish(cfgTopic, JSON.stringify({ action: "get_range" }), { qos: 1 });
+        }, 400);
       }
       return;
     }
@@ -685,6 +688,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
             const cfgTopic = `device/${d.mqtt_user}/${d.device_name}/config`;
             client.publish(cfgTopic, JSON.stringify({ action: "get_periodic" }), { qos: 1 });
             client.publish(cfgTopic, JSON.stringify({ action: "get_schedule" }), { qos: 1 });
+            client.publish(cfgTopic, JSON.stringify({ action: "get_range"    }), { qos: 1 });
           });
         }, 1500);
       });
@@ -1641,8 +1645,9 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                 const cfg         = timerConfigs[action];
                 const hasPeriodic = cfg?.active && cfg.mode === "periodic";
                 const hasSchedule = cfg?.active && cfg.mode === "schedule";
+                const hasRange    = cfg?.active && cfg.mode === "range";
                 // 分享設備：排程設定來自 ESP32（唯讀顯示，用琥珀色區分）
-                const isSharedSched = !!(selectedDevice?.share_from && (hasPeriodic || hasSchedule));
+                const isSharedSched = !!(selectedDevice?.share_from && (hasPeriodic || hasSchedule || hasRange));
 
                 const fontSize = label.length <= 2 ? "1.1rem"
                                : label.length <= 4 ? "0.88rem"
@@ -1655,6 +1660,11 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                 // 排程副文字：顯示 HH:MM
                 const schedSubLabel = hasSchedule && cfg?.schedule
                   ? `${String(cfg.schedule.hour).padStart(2,"0")}:${String(cfg.schedule.minute).padStart(2,"0")}`
+                  : null;
+
+                // 區間副文字：顯示 開HH:MM→關HH:MM
+                const rangeSubLabel = hasRange && cfg?.rangeOpen && cfg?.rangeClose
+                  ? `${String(cfg.rangeOpen.hour).padStart(2,"0")}:${String(cfg.rangeOpen.minute).padStart(2,"0")}→${String(cfg.rangeClose.hour).padStart(2,"0")}:${String(cfg.rangeClose.minute).padStart(2,"0")}`
                   : null;
 
                 return (
@@ -1685,6 +1695,12 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                             ? `0 0 10px 2px #f59e0b44, inset 0 0 14px #f59e0b14`
                             : `0 0 10px 2px #818cf844, inset 0 0 14px #818cf814`,
                         } : {}),
+                        ...(hasRange && !isPressed ? {
+                          animation: "schedPulse 4s ease-in-out infinite",
+                          boxShadow: isSharedSched
+                            ? `0 0 10px 2px #f59e0b44, inset 0 0 14px #f59e0b14`
+                            : `0 0 10px 2px #34d39944, inset 0 0 14px #34d39914`,
+                        } : {}),
                       }}
                       className={`
                         w-full py-3 md:py-4 rounded-xl border-2 font-bold
@@ -1713,9 +1729,16 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                           {isSharedSched ? `主機 ${schedSubLabel ?? ""}` : (schedSubLabel ?? "")}
                         </span>
                       )}
+                      {!isPressed && hasRange && (
+                        <span className={`text-[9px] font-mono leading-none mt-0.5 ${
+                          isSharedSched ? "text-amber-300 opacity-80" : "text-emerald-300 opacity-70"
+                        }`}>
+                          {isSharedSched ? `主機 ${rangeSubLabel ?? ""}` : (rangeSubLabel ?? "")}
+                        </span>
+                      )}
                     </button>
                     {/* 角標：分享設備用琥珀色圖示，與 owner 的藍/紫色區分 */}
-                    {(hasPeriodic || hasSchedule) && (
+                    {(hasPeriodic || hasSchedule || hasRange) && (
                       <span className={`absolute top-1 right-1 pointer-events-none flex gap-0.5 ${
                         isSharedSched ? "opacity-90" : "opacity-60"
                       }`}>
@@ -1724,6 +1747,9 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                         )}
                         {hasSchedule && (
                           <Timer style={{ width:10, height:10, color: isSharedSched ? "#f59e0b" : "#818cf8" }} />
+                        )}
+                        {hasRange && (
+                          <Clock style={{ width:10, height:10, color: isSharedSched ? "#f59e0b" : "#34d399" }} />
                         )}
                       </span>
                     )}
@@ -2451,7 +2477,17 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                       onClick={() => {
                         setEditTimerMode(cfg?.mode ?? "periodic");
                         setEditTimerSec(cfg?.intervalSec ?? 60);
-                        if (cfg?.mode === "schedule" && cfg.schedule) {
+                        if (cfg?.mode === "range" && cfg.rangeOpen && cfg.rangeClose) {
+                          setEditRangeOpenHour(cfg.rangeOpen.hour);
+                          setEditRangeOpenMin(cfg.rangeOpen.minute);
+                          setEditRangeCloseHour(cfg.rangeClose.hour);
+                          setEditRangeCloseMin(cfg.rangeClose.minute);
+                          setEditSchedType("weekday");
+                          setEditSchedDays([1,2,3,4,5]);
+                          setEditSchedDates([]);
+                          setEditSchedHour(8);
+                          setEditSchedMin(0);
+                        } else if (cfg?.mode === "schedule" && cfg.schedule) {
                           setEditSchedType(cfg.schedule.type);
                           setEditSchedHour(cfg.schedule.hour);
                           setEditSchedMin(cfg.schedule.minute);
@@ -2463,12 +2499,16 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                             setEditSchedDays([]);
                             setEditSchedDates(cfg.schedule.dates ?? []);
                           }
+                          setEditRangeOpenHour(6);  setEditRangeOpenMin(0);
+                          setEditRangeCloseHour(20); setEditRangeCloseMin(0);
                         } else {
                           setEditSchedType("weekday");
                           setEditSchedDays([1,2,3,4,5]);
                           setEditSchedDates([]);
                           setEditSchedHour(8);
                           setEditSchedMin(0);
+                          setEditRangeOpenHour(6);  setEditRangeOpenMin(0);
+                          setEditRangeCloseHour(20); setEditRangeCloseMin(0);
                         }
                         setShowTimerModal(action);
                         setShowBtnMenu(null);
@@ -2549,6 +2589,14 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
               active: true,
             };
           }
+          if (editTimerMode === "range") {
+            return {
+              mode: "range",
+              active: true,
+              rangeOpen:  { hour: editRangeOpenHour,  minute: editRangeOpenMin  },
+              rangeClose: { hour: editRangeCloseHour, minute: editRangeCloseMin },
+            };
+          }
           const mask = editSchedDays.reduce((acc, d) => acc | (1<<(d-1)), 0);
           return {
             mode: "schedule",
@@ -2578,10 +2626,11 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
                 {/* ── 模式選擇 ── */}
                 <p className="text-xs text-slate-400 mb-2">觸發模式</p>
-                <div className="grid grid-cols-2 gap-2 mb-4">
+                <div className="grid grid-cols-3 gap-2 mb-4">
                   {([
                     { m:"periodic" as const, icon:"🔁", t:"定期觸發" },
                     { m:"schedule" as const, icon:"📅", t:"排程觸發" },
+                    { m:"range"    as const, icon:"🕐", t:"觸發區間" },
                   ]).map(({ m, icon, t }) => (
                     <button key={m} onClick={() => setEditTimerMode(m)}
                       className={`flex flex-col items-start gap-0.5 px-3 py-2.5 rounded-xl border text-left ${
@@ -2598,41 +2647,79 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                 {editTimerMode === "periodic" && (
                   <>
                     <p className="text-xs text-slate-400 mb-1.5">觸發間隔（秒，需大於 1）</p>
-                    <div className="relative mb-1.5">
-                      <button
-                        type="button"
-                        onClick={() => adjustEditTimerSec(-1)}
-                        className="absolute left-1 top-1 bottom-1 w-12 rounded-lg border border-slate-700 bg-slate-800 text-slate-200 text-sm font-bold active:bg-slate-700"
-                      >
-                        -1
+                    <div className="flex gap-2 mb-1.5">
+                      <button type="button" onClick={() => adjustEditTimerSec(-60)}
+                        className="w-14 py-3 rounded-xl border border-slate-700 bg-slate-800 text-slate-200 text-xs font-bold active:bg-slate-700">
+                        -1m
+                      </button>
+                      <button type="button" onClick={() => adjustEditTimerSec(-1)}
+                        className="w-12 py-3 rounded-xl border border-slate-700 bg-slate-800 text-slate-200 text-xs font-bold active:bg-slate-700">
+                        -1s
                       </button>
                       <input type="number" min={2} step={1}
                         value={editTimerSec}
                         onChange={e => setEditTimerSec(Math.max(2, parseInt(e.target.value, 10) || 2))}
-                        className="w-full bg-slate-800 border border-slate-700 rounded-xl px-14 py-3 text-white text-sm text-center focus:outline-none focus:border-yellow-500"
+                        className="flex-1 bg-slate-800 border border-yellow-500/60 rounded-xl px-2 py-3 text-white text-sm text-center focus:outline-none focus:border-yellow-500"
                       />
-                      <button
-                        type="button"
-                        onClick={() => adjustEditTimerSec(1)}
-                        className="absolute right-1 top-1 bottom-1 w-12 rounded-lg border border-slate-700 bg-slate-800 text-slate-200 text-sm font-bold active:bg-slate-700"
-                      >
-                        +1
+                      <button type="button" onClick={() => adjustEditTimerSec(1)}
+                        className="w-12 py-3 rounded-xl border border-slate-700 bg-slate-800 text-slate-200 text-xs font-bold active:bg-slate-700">
+                        +1s
+                      </button>
+                      <button type="button" onClick={() => adjustEditTimerSec(60)}
+                        className="w-14 py-3 rounded-xl border border-slate-700 bg-slate-800 text-slate-200 text-xs font-bold active:bg-slate-700">
+                        +1m
                       </button>
                     </div>
                     <p className="text-xs text-yellow-400/80 mb-3">→ {fmtSec(safeSec)}</p>
-                    <div className="flex gap-1.5 flex-wrap mb-2">
-                      {[60,120,300,600,1800,3600].map(s => (
-                        <button key={s} onClick={() => setEditTimerSec(s)}
-                          className={`px-2.5 py-1 rounded-lg text-xs border ${
-                            editTimerSec===s
-                              ? "bg-yellow-500/20 border-yellow-500 text-yellow-300"
-                              : "bg-slate-800 border-slate-700 text-slate-400 active:bg-slate-700"}`}>
-                          {s>=3600?`${s/3600}h`:`${s/60}m`}
-                        </button>
-                      ))}
-                    </div>
                   </>
                 )}
+
+                {/* ── range（觸發區間）── */}
+                {editTimerMode === "range" && (() => {
+                  const HourSelect = ({ value, onChange }: { value: number; onChange: (v: number) => void }) => (
+                    <select value={value} onChange={e => onChange(parseInt(e.target.value))}
+                      className="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-2 py-2.5 text-white text-sm focus:outline-none focus:border-emerald-500 appearance-none text-center">
+                      {Array.from({length:24},(_,i)=>i).map(h=>(
+                        <option key={h} value={h}>{String(h).padStart(2,"0")}</option>
+                      ))}
+                    </select>
+                  );
+                  const MinSelect = ({ value, onChange }: { value: number; onChange: (v: number) => void }) => (
+                    <select value={value} onChange={e => onChange(parseInt(e.target.value))}
+                      className="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-2 py-2.5 text-white text-sm focus:outline-none focus:border-emerald-500 appearance-none text-center">
+                      {Array.from({length:60},(_,i)=>i).map(m=>(
+                        <option key={m} value={m}>{String(m).padStart(2,"0")}</option>
+                      ))}
+                    </select>
+                  );
+                  return (
+                    <>
+                      <p className="text-xs text-slate-400 mb-1">每日自動開啟時間</p>
+                      <div className="flex items-center gap-2 mb-3 bg-slate-800/60 border border-emerald-500/30 rounded-xl px-3 py-2.5">
+                        <span className="text-emerald-400 text-sm font-bold w-5 flex-shrink-0">開</span>
+                        <HourSelect value={editRangeOpenHour}  onChange={setEditRangeOpenHour} />
+                        <span className="text-slate-400 font-bold text-lg">:</span>
+                        <MinSelect  value={editRangeOpenMin}   onChange={setEditRangeOpenMin}  />
+                        <span className="text-slate-300 text-sm font-mono ml-1">
+                          {String(editRangeOpenHour).padStart(2,"0")}:{String(editRangeOpenMin).padStart(2,"0")}
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-400 mb-1">每日自動關閉時間</p>
+                      <div className="flex items-center gap-2 mb-3 bg-slate-800/60 border border-red-500/30 rounded-xl px-3 py-2.5">
+                        <span className="text-red-400 text-sm font-bold w-5 flex-shrink-0">關</span>
+                        <HourSelect value={editRangeCloseHour} onChange={setEditRangeCloseHour} />
+                        <span className="text-slate-400 font-bold text-lg">:</span>
+                        <MinSelect  value={editRangeCloseMin}  onChange={setEditRangeCloseMin}  />
+                        <span className="text-slate-300 text-sm font-mono ml-1">
+                          {String(editRangeCloseHour).padStart(2,"0")}:{String(editRangeCloseMin).padStart(2,"0")}
+                        </span>
+                      </div>
+                      <div className="text-xs text-slate-500 bg-slate-800/50 border border-slate-700 rounded-xl px-3 py-2 mb-3">
+                        設定後將上傳至 ESP32 NVS，斷網期間仍可依時間自動開關。
+                      </div>
+                    </>
+                  );
+                })()}
 
                 {/* ── schedule ── */}
                 {editTimerMode === "schedule" && (
@@ -2727,7 +2814,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                       <span className="text-slate-400 font-bold text-lg">:</span>
                       <select value={editSchedMin} onChange={e => setEditSchedMin(parseInt(e.target.value))}
                         className="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-indigo-500 appearance-none text-center">
-                        {[0,5,10,15,20,25,30,35,40,45,50,55].map(m=>(
+                        {Array.from({length:60},(_,i)=>i).map(m=>(
                           <option key={m} value={m}>{String(m).padStart(2,"0")}</option>
                         ))}
                       </select>
@@ -2752,8 +2839,10 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                     取消
                   </button>
                   <button
-                    disabled={editTimerMode==="schedule" && editSchedType==="weekday" && editSchedDays.length===0
-                           || editTimerMode==="schedule" && editSchedType==="date"    && editSchedDates.length===0}
+                    disabled={
+                      (editTimerMode==="schedule" && editSchedType==="weekday" && editSchedDays.length===0) ||
+                      (editTimerMode==="schedule" && editSchedType==="date"    && editSchedDates.length===0)
+                    }
                     onClick={() => { saveTimerConfig(action, buildCfg()); setShowTimerModal(null); }}
                     className="flex-1 py-2.5 rounded-xl bg-yellow-500 text-slate-900 text-sm font-bold active:bg-yellow-400 disabled:opacity-40 disabled:cursor-not-allowed">
                     啟用
