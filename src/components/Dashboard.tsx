@@ -92,10 +92,12 @@ interface SchedDef {
   minute: number;
 }
 interface TimerCfg {
-  mode: "periodic" | "schedule";
+  mode: "periodic" | "schedule" | "range";
   intervalSec?: number;   // periodic 用，允許自訂大於 1 的整數秒數
   periodicStartedAt?: number; // periodic 開始時間（ms）
   schedule?: SchedDef;    // schedule 用（送到 ESP32）
+  rangeOpen?:  { hour: number; minute: number }; // range 用：每日觸發開啟時間
+  rangeClose?: { hour: number; minute: number }; // range 用：每日觸發關閉時間
   active: boolean;
 }
 
@@ -250,12 +252,17 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   // periodic 編輯
   const [editTimerSec, setEditTimerSec]   = useState(60);
   // schedule 編輯
-  const [editTimerMode, setEditTimerMode]     = useState<"periodic"|"schedule">("periodic");
+  const [editTimerMode, setEditTimerMode]     = useState<"periodic"|"schedule"|"range">("periodic");
   const [editSchedType, setEditSchedType]     = useState<"weekday"|"date">("weekday");
   const [editSchedDays, setEditSchedDays]     = useState<number[]>([1,2,3,4,5]); // 1=Mon…7=Sun
   const [editSchedDates, setEditSchedDates]   = useState<string[]>([]);
   const [editSchedHour, setEditSchedHour]     = useState(8);
   const [editSchedMin, setEditSchedMin]       = useState(0);
+  // range 編輯
+  const [editRangeOpenHour,  setEditRangeOpenHour]  = useState(6);
+  const [editRangeOpenMin,   setEditRangeOpenMin]   = useState(0);
+  const [editRangeCloseHour, setEditRangeCloseHour] = useState(20);
+  const [editRangeCloseMin,  setEditRangeCloseMin]  = useState(0);
   const selectedDeviceRef = React.useRef<DeviceCredential | null>(null);
   const mqttListRef       = React.useRef<Record<number, string>>({});
   const readBtnLabelsForDevice = useCallback((dev: DeviceCredential | null): Record<string, string> => {
@@ -742,6 +749,47 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           return;
         }
 
+        // ── ESP32 回報觸發區間設定（range_cfg）→ 同步 state + localStorage ──
+        if (parsed?.type === "range_cfg" && Array.isArray(parsed.ranges)) {
+          const matchedDevs = devs.filter(d =>
+            d.mqtt_user && d.device_name &&
+            topic.startsWith(`device/${d.mqtt_user}/${d.device_name}/`)
+          );
+          if (!matchedDevs.length) return;
+
+          const ownerDev = matchedDevs.find(d => !d.share_from);
+          let stored: Record<string, TimerCfg> = {};
+          if (ownerDev) {
+            try { stored = JSON.parse(localStorage.getItem(`btnTimers_${ownerDev.id}`) || "{}"); } catch {}
+          } else {
+            try { stored = JSON.parse(localStorage.getItem(`btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`) || "{}"); } catch {}
+          }
+
+          (parsed.ranges as any[]).forEach((r: any) => {
+            const a: string = r.target;
+            if (r.active) {
+              stored[a] = {
+                mode: "range", active: true,
+                rangeOpen:  { hour: r.openHour,  minute: r.openMin  },
+                rangeClose: { hour: r.closeHour, minute: r.closeMin },
+              };
+            } else {
+              if (stored[a]?.mode === "range") delete stored[a];
+            }
+          });
+
+          if (ownerDev) {
+            try { localStorage.setItem(`btnTimers_${ownerDev.id}`, JSON.stringify(stored)); } catch {}
+          } else {
+            try { localStorage.setItem(`btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`, JSON.stringify(stored)); } catch {}
+          }
+
+          if (matchedDevs.some(d => d.id === selectedDeviceRef.current?.id)) {
+            setTimerConfigs({ ...stored });
+          }
+          return;
+        }
+
         // ── ESP32 回報排程設定（schedule_cfg）→ 同步 state + localStorage ──
         if (parsed?.type === "schedule_cfg" && Array.isArray(parsed.schedules)) {
           // 找到所有符合此 topic 的設備（owner row + share row 都要）
@@ -869,12 +917,14 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     if (!cfg || !cfg.active) {
       client.publish(cfgTopic, JSON.stringify({ action: "set_periodic", target: action, active: false }), { qos: 1 });
       setTimeout(() => client.publish(cfgTopic, JSON.stringify({ action: "set_schedule", target: action, active: false }), { qos: 1 }), 200);
+      setTimeout(() => client.publish(cfgTopic, JSON.stringify({ action: "set_range",    target: action, active: false }), { qos: 1 }), 400);
       return;
     }
     if (cfg.mode === "periodic") {
       const intervalSec = Math.max(2, Math.floor(cfg.intervalSec ?? 60));
       client.publish(cfgTopic, JSON.stringify({ action: "set_periodic", target: action, active: true, intervalSec }), { qos: 1 });
       setTimeout(() => client.publish(cfgTopic, JSON.stringify({ action: "set_schedule", target: action, active: false }), { qos: 1 }), 200);
+      setTimeout(() => client.publish(cfgTopic, JSON.stringify({ action: "set_range",    target: action, active: false }), { qos: 1 }), 400);
       return;
     }
     if (cfg.mode === "schedule" && cfg.schedule) {
@@ -884,6 +934,16 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       else                      { payload.dates    = (s.dates ?? []).join(","); }
       client.publish(cfgTopic, JSON.stringify(payload), { qos: 1 });
       setTimeout(() => client.publish(cfgTopic, JSON.stringify({ action: "set_periodic", target: action, active: false }), { qos: 1 }), 200);
+      setTimeout(() => client.publish(cfgTopic, JSON.stringify({ action: "set_range",    target: action, active: false }), { qos: 1 }), 400);
+    }
+    if (cfg.mode === "range" && cfg.rangeOpen && cfg.rangeClose) {
+      client.publish(cfgTopic, JSON.stringify({
+        action: "set_range", target: action, active: true,
+        openHour:  cfg.rangeOpen.hour,  openMin:  cfg.rangeOpen.minute,
+        closeHour: cfg.rangeClose.hour, closeMin: cfg.rangeClose.minute,
+      }), { qos: 1 });
+      setTimeout(() => client.publish(cfgTopic, JSON.stringify({ action: "set_periodic", target: action, active: false }), { qos: 1 }), 200);
+      setTimeout(() => client.publish(cfgTopic, JSON.stringify({ action: "set_schedule", target: action, active: false }), { qos: 1 }), 400);
     }
   }, []);
 
@@ -2340,6 +2400,11 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         const cfgSummary = () => {
           if (!hasCfg || !cfg) return "未設定";
           if (cfg.mode === "periodic") return `定期觸發 · 每 ${fmtSec(cfg.intervalSec ?? 60)}`;
+          if (cfg.mode === "range" && cfg.rangeOpen && cfg.rangeClose) {
+            const o = `${String(cfg.rangeOpen.hour).padStart(2,"0")}:${String(cfg.rangeOpen.minute).padStart(2,"0")}`;
+            const c = `${String(cfg.rangeClose.hour).padStart(2,"0")}:${String(cfg.rangeClose.minute).padStart(2,"0")}`;
+            return `區間 · 開 ${o} → 關 ${c}`;
+          }
           const s = cfg.schedule;
           if (!s) return "排程觸發（未設定）";
           const t = `${String(s.hour).padStart(2,"0")}:${String(s.minute).padStart(2,"0")}`;
