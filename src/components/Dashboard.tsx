@@ -384,12 +384,17 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     setBtnLabels(readBtnLabelsForDevice(selectedDevice));
   }, [readBtnLabelsForDevice, selectedDevice?.id]);
 
-  // 同步 NVS 設定：當選中的設備變更或重新連線時，主動向設備請求最新的週期、排程、區間、按鈕名稱
-  const requestDeviceConfigs = useCallback((device: DeviceCredential | null) => {
+  // 強制同步設備設定（含 range）的函數，支援重試
+  const requestDeviceConfigs = useCallback((device: DeviceCredential | null, retryCount = 0) => {
     if (!device?.mqtt_user || !device?.device_name) return;
     const no = (device.server_no != null && device.server_no > 0) ? device.server_no : 1;
     const client = mqttClientsRef.current[no];
-    if (!client || !client.connected) return;
+    if (!client || !client.connected) {
+      if (retryCount < 5) {
+        setTimeout(() => requestDeviceConfigs(device, retryCount + 1), 1000);
+      }
+      return;
+    }
     const cfgTopic = `device/${device.mqtt_user}/${device.device_name}/config`;
     client.publish(cfgTopic, JSON.stringify({ action: "get_periodic"   }), { qos: 1 });
     setTimeout(() => client.publish(cfgTopic, JSON.stringify({ action: "get_schedule"   }), { qos: 1 }), 200);
@@ -397,10 +402,12 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     setTimeout(() => client.publish(cfgTopic, JSON.stringify({ action: "get_btn_labels" }), { qos: 1 }), 600);
   }, []);
 
+  // 當設備切換時，主動請求最新設定（包含 range）
   useEffect(() => {
     requestDeviceConfigs(selectedDeviceRef.current);
-  }, [selectedDevice?.id, requestDeviceConfigs]); // 設備切換時請求
+  }, [selectedDevice?.id, requestDeviceConfigs]);
 
+  // 當 selectedDevice 或 devices 變化時，重新整理 timerConfigs 並確保同步
   useEffect(() => {
     setShowBtnMenu(null);
     setShowTimerModal(null);
@@ -418,7 +425,6 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         let ownerConfigs: Record<string, TimerCfg> = {};
         try { ownerConfigs = JSON.parse(localStorage.getItem(`btnTimers_${ownerRow.id}`) || "{}"); } catch {}
         setTimerConfigs(ownerConfigs);
-        // 主動請求一次主人設備的最新設定（確保同步）
         requestDeviceConfigs(ownerRow);
       } else {
         let tmpConfigs: Record<string, TimerCfg> = {};
@@ -600,17 +606,22 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         const allTopics = [...statusTopics, ...cfgReportTopics];
         if (allTopics.length) client.subscribe(allTopics, { qos: 0 });
 
-        // 連線後主動請求所有設備的設定
+        // 連線後主動請求所有設備的設定（多次發送確保收到）
         const seenDev = new Set<string>();
         devs.filter(d => d.mqtt_user && d.device_name).forEach(d => {
           const key = `${d.mqtt_user}|${d.device_name}`;
           if (seenDev.has(key)) return;
           seenDev.add(key);
           const cfgTopic = `device/${d.mqtt_user}/${d.device_name}/config`;
-          client.publish(cfgTopic, JSON.stringify({ action: "get_periodic"   }), { qos: 1 });
-          client.publish(cfgTopic, JSON.stringify({ action: "get_schedule"   }), { qos: 1 });
-          client.publish(cfgTopic, JSON.stringify({ action: "get_range"      }), { qos: 1 });
-          client.publish(cfgTopic, JSON.stringify({ action: "get_btn_labels" }), { qos: 1 });
+          // 發送三次，間隔短，確保設備能收到
+          for (let i = 0; i < 3; i++) {
+            setTimeout(() => {
+              client.publish(cfgTopic, JSON.stringify({ action: "get_periodic"   }), { qos: 1 });
+              client.publish(cfgTopic, JSON.stringify({ action: "get_schedule"   }), { qos: 1 });
+              client.publish(cfgTopic, JSON.stringify({ action: "get_range"      }), { qos: 1 });
+              client.publish(cfgTopic, JSON.stringify({ action: "get_btn_labels" }), { qos: 1 });
+            }, i * 500);
+          }
         });
       });
 
@@ -620,7 +631,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         let parsed: any = null;
         try { parsed = JSON.parse(text); } catch {}
 
-        // 處理各種設定回報
+        // 處理定期觸發回報
         if (parsed?.type === "periodic_cfg" && Array.isArray(parsed.periodics)) {
           const matchedDevs = devs.filter(d =>
             d.mqtt_user && d.device_name &&
@@ -663,6 +674,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           return;
         }
 
+        // 處理觸發區間回報（重要）
         if (parsed?.type === "range_cfg" && Array.isArray(parsed.ranges)) {
           const matchedDevs = devs.filter(d =>
             d.mqtt_user && d.device_name &&
@@ -703,6 +715,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           return;
         }
 
+        // 處理排程回報
         if (parsed?.type === "schedule_cfg" && Array.isArray(parsed.schedules)) {
           const matchedDevs = devs.filter(d =>
             d.mqtt_user && d.device_name &&
@@ -747,6 +760,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           return;
         }
 
+        // 處理按鈕名稱回報
         if (parsed?.type === "btn_labels_cfg" && parsed.labels && typeof parsed.labels === "object") {
           const matchedDevs = devs.filter(d =>
             d.mqtt_user && d.device_name &&
@@ -773,7 +787,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           return;
         }
 
-        // 處理設備狀態（僅限明確的 status 主題，避免誤判）
+        // 處理設備狀態（僅限明確的 status 主題）
         if (topic.endsWith("/status")) {
           const online = text.toLowerCase() === "online" || text.toLowerCase() === "connected";
           const offline = text.toLowerCase() === "offline" || text.toLowerCase() === "disconnected";
@@ -792,7 +806,6 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       client.on("close", () => {
         if (!isActive) return;
         setServerStatusMap((prev) => ({ ...prev, [no]: "Offline" }));
-        // 當 MQTT 連線中斷，將該伺服器下所有設備標記為離線
         devs.forEach(d => {
           setDeviceOnlineMap(prev => ({ ...prev, [d.id]: false }));
         });
