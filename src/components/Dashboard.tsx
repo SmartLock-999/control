@@ -2715,7 +2715,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                         </span>
                       </div>
                       <div className="text-xs text-slate-500 bg-slate-800/50 border border-slate-700 rounded-xl px-3 py-2 mb-3">
-                        設定後將上傳至 ESP32 NVS，斷網期間仍可依時間自動開關。
+                        斷網期間仍可依時間自動開關，斷電後須重新設定。
                       </div>
                     </>
                   );
