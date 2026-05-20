@@ -384,6 +384,21 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     setBtnLabels(readBtnLabelsForDevice(selectedDevice));
   }, [readBtnLabelsForDevice, selectedDevice?.id]);
 
+  // 同步 NVS 設定：當選中的設備變更時，主動向設備請求最新的週期、排程、區間、按鈕名稱
+  useEffect(() => {
+    const dev = selectedDeviceRef.current;
+    if (!dev?.mqtt_user || !dev?.device_name) return;
+    const no = (dev.server_no != null && dev.server_no > 0) ? dev.server_no : 1;
+    const client = mqttClientsRef.current[no];
+    if (!client || !client.connected) return;
+
+    const cfgTopic = `device/${dev.mqtt_user}/${dev.device_name}/config`;
+    client.publish(cfgTopic, JSON.stringify({ action: "get_periodic"   }), { qos: 1 });
+    setTimeout(() => client.publish(cfgTopic, JSON.stringify({ action: "get_schedule"   }), { qos: 1 }), 200);
+    setTimeout(() => client.publish(cfgTopic, JSON.stringify({ action: "get_range"      }), { qos: 1 }), 400);
+    setTimeout(() => client.publish(cfgTopic, JSON.stringify({ action: "get_btn_labels" }), { qos: 1 }), 600);
+  }, [selectedDevice?.id]); // 只依賴設備 id，切換時重新請求
+
   useEffect(() => {
     setShowBtnMenu(null);
     setShowTimerModal(null);
@@ -406,28 +421,13 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         try { tmpConfigs = JSON.parse(localStorage.getItem(`btnTimers_tmp_${dev.mqtt_user}_${dev.device_name}`) || "{}"); } catch {}
         setTimerConfigs(tmpConfigs);
       }
-      const no = (dev.server_no != null && dev.server_no > 0) ? dev.server_no : 1;
-      const client = mqttClientsRef.current[no];
-      if (client?.connected && dev.mqtt_user && dev.device_name) {
-        const cfgTopic = `device/${dev.mqtt_user}/${dev.device_name}/config`;
-        client.publish(cfgTopic, JSON.stringify({ action: "get_periodic" }), { qos: 1 });
-        setTimeout(() => {
-          client.publish(cfgTopic, JSON.stringify({ action: "get_schedule" }), { qos: 1 });
-        }, 200);
-        setTimeout(() => {
-          client.publish(cfgTopic, JSON.stringify({ action: "get_range" }), { qos: 1 });
-        }, 400);
-        setTimeout(() => {
-          client.publish(cfgTopic, JSON.stringify({ action: "get_btn_labels" }), { qos: 1 });
-        }, 600);
-      }
-      return;
+      // 共享設備也會觸發上面的同步 useEffect 來拉取主人設備的最新設定
+    } else {
+      const key = timerStorageKey(selectedDevice);
+      let configs: Record<string, TimerCfg> = {};
+      try { configs = JSON.parse(localStorage.getItem(key) || "{}"); } catch {}
+      setTimerConfigs(configs);
     }
-
-    const key = timerStorageKey(selectedDevice);
-    let configs: Record<string, TimerCfg> = {};
-    try { configs = JSON.parse(localStorage.getItem(key) || "{}"); } catch {}
-    setTimerConfigs(configs);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedDevice?.id, selectedDevice?.share_from, devices]);
 
@@ -595,19 +595,18 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         const allTopics = [...statusTopics, ...cfgReportTopics];
         if (allTopics.length) client.subscribe(allTopics, { qos: 0 });
 
-        setTimeout(() => {
-          const seen = new Set<string>();
-          devs.filter(d => d.mqtt_user && d.device_name).forEach(d => {
-            const key = `${d.mqtt_user}|${d.device_name}`;
-            if (seen.has(key)) return;
-            seen.add(key);
-            const cfgTopic = `device/${d.mqtt_user}/${d.device_name}/config`;
-            client.publish(cfgTopic, JSON.stringify({ action: "get_periodic"   }), { qos: 1 });
-            client.publish(cfgTopic, JSON.stringify({ action: "get_schedule"   }), { qos: 1 });
-            client.publish(cfgTopic, JSON.stringify({ action: "get_range"      }), { qos: 1 });
-            client.publish(cfgTopic, JSON.stringify({ action: "get_btn_labels" }), { qos: 1 });
-          });
-        }, 1500);
+        // 連線後對所有設備發送一次設定請求，確保同步
+        const seenDev = new Set<string>();
+        devs.filter(d => d.mqtt_user && d.device_name).forEach(d => {
+          const key = `${d.mqtt_user}|${d.device_name}`;
+          if (seenDev.has(key)) return;
+          seenDev.add(key);
+          const cfgTopic = `device/${d.mqtt_user}/${d.device_name}/config`;
+          client.publish(cfgTopic, JSON.stringify({ action: "get_periodic"   }), { qos: 1 });
+          client.publish(cfgTopic, JSON.stringify({ action: "get_schedule"   }), { qos: 1 });
+          client.publish(cfgTopic, JSON.stringify({ action: "get_range"      }), { qos: 1 });
+          client.publish(cfgTopic, JSON.stringify({ action: "get_btn_labels" }), { qos: 1 });
+        });
       });
 
       client.on("message", (topic, payload) => {
