@@ -842,6 +842,35 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           }
           return;
         }
+        // ── App 層同步完整設定（app_cfg）→ 分享設備直接顯示 owner 的 timerConfigs ──
+        if (parsed?.type === "app_cfg" && parsed.configs && typeof parsed.configs === "object") {
+          const matchedDevs = devs.filter(d =>
+            d.mqtt_user && d.device_name &&
+            topic.startsWith(`device/${d.mqtt_user}/${d.device_name}/`)
+          );
+          if (matchedDevs.length) {
+            const ownerDev = matchedDevs.find(d => !d.share_from);
+            const configs = parsed.configs as Record<string, TimerCfg>;
+            if (ownerDev) {
+              // owner 自己收到（自發自收）：更新 localStorage 確保一致
+              try { localStorage.setItem(`btnTimers_${ownerDev.id}`, JSON.stringify(configs)); } catch {}
+            } else {
+              // 純被分享者：更新臨時 key
+              try {
+                localStorage.setItem(
+                  `btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`,
+                  JSON.stringify(configs)
+                );
+              } catch {}
+            }
+            // 目前選中的設備屬於同一實體設備 → 更新顯示
+            if (matchedDevs.some(d => d.id === selectedDeviceRef.current?.id)) {
+              setTimerConfigs({ ...configs });
+            }
+          }
+          return;
+        }
+
         const action = parsed?.action ?? text;
         const online = String(action).toLowerCase() !== "offline"
                     && String(action).toLowerCase() !== "disconnected";
@@ -964,6 +993,21 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       const updated = { ...prev };
       if (cfg === null) { delete updated[action]; } else { updated[action] = cfg; }
       try { localStorage.setItem(key, JSON.stringify(updated)); } catch {}
+
+      // ── 將完整設定 publish 到 cfg_report（retain=true），讓分享設備即時同步 ──
+      if (dev?.mqtt_user && dev?.device_name) {
+        const no = (dev.server_no != null && dev.server_no > 0) ? dev.server_no : 1;
+        const client = mqttClientsRef.current[no];
+        if (client?.connected) {
+          const cfgReportTopic = `device/${dev.mqtt_user}/${dev.device_name}/cfg_report`;
+          client.publish(
+            cfgReportTopic,
+            JSON.stringify({ type: "app_cfg", configs: updated }),
+            { qos: 1, retain: true }
+          );
+        }
+      }
+
       return updated;
     });
     sendScheduleToDevice(action, cfg);
