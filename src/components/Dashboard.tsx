@@ -384,20 +384,22 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     setBtnLabels(readBtnLabelsForDevice(selectedDevice));
   }, [readBtnLabelsForDevice, selectedDevice?.id]);
 
-  // 同步 NVS 設定：當選中的設備變更時，主動向設備請求最新的週期、排程、區間、按鈕名稱
-  useEffect(() => {
-    const dev = selectedDeviceRef.current;
-    if (!dev?.mqtt_user || !dev?.device_name) return;
-    const no = (dev.server_no != null && dev.server_no > 0) ? dev.server_no : 1;
+  // 同步 NVS 設定：當選中的設備變更或重新連線時，主動向設備請求最新的週期、排程、區間、按鈕名稱
+  const requestDeviceConfigs = useCallback((device: DeviceCredential | null) => {
+    if (!device?.mqtt_user || !device?.device_name) return;
+    const no = (device.server_no != null && device.server_no > 0) ? device.server_no : 1;
     const client = mqttClientsRef.current[no];
     if (!client || !client.connected) return;
-
-    const cfgTopic = `device/${dev.mqtt_user}/${dev.device_name}/config`;
+    const cfgTopic = `device/${device.mqtt_user}/${device.device_name}/config`;
     client.publish(cfgTopic, JSON.stringify({ action: "get_periodic"   }), { qos: 1 });
     setTimeout(() => client.publish(cfgTopic, JSON.stringify({ action: "get_schedule"   }), { qos: 1 }), 200);
     setTimeout(() => client.publish(cfgTopic, JSON.stringify({ action: "get_range"      }), { qos: 1 }), 400);
     setTimeout(() => client.publish(cfgTopic, JSON.stringify({ action: "get_btn_labels" }), { qos: 1 }), 600);
-  }, [selectedDevice?.id]); // 只依賴設備 id，切換時重新請求
+  }, []);
+
+  useEffect(() => {
+    requestDeviceConfigs(selectedDeviceRef.current);
+  }, [selectedDevice?.id, requestDeviceConfigs]); // 設備切換時請求
 
   useEffect(() => {
     setShowBtnMenu(null);
@@ -416,20 +418,23 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         let ownerConfigs: Record<string, TimerCfg> = {};
         try { ownerConfigs = JSON.parse(localStorage.getItem(`btnTimers_${ownerRow.id}`) || "{}"); } catch {}
         setTimerConfigs(ownerConfigs);
+        // 主動請求一次主人設備的最新設定（確保同步）
+        requestDeviceConfigs(ownerRow);
       } else {
         let tmpConfigs: Record<string, TimerCfg> = {};
         try { tmpConfigs = JSON.parse(localStorage.getItem(`btnTimers_tmp_${dev.mqtt_user}_${dev.device_name}`) || "{}"); } catch {}
         setTimerConfigs(tmpConfigs);
+        requestDeviceConfigs(dev);
       }
-      // 共享設備也會觸發上面的同步 useEffect 來拉取主人設備的最新設定
     } else {
       const key = timerStorageKey(selectedDevice);
       let configs: Record<string, TimerCfg> = {};
       try { configs = JSON.parse(localStorage.getItem(key) || "{}"); } catch {}
       setTimerConfigs(configs);
+      requestDeviceConfigs(selectedDevice);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedDevice?.id, selectedDevice?.share_from, devices]);
+  }, [selectedDevice?.id, selectedDevice?.share_from, devices, requestDeviceConfigs]);
 
   useEffect(() => {
     if (locationsLoaded) return;
@@ -595,7 +600,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         const allTopics = [...statusTopics, ...cfgReportTopics];
         if (allTopics.length) client.subscribe(allTopics, { qos: 0 });
 
-        // 連線後對所有設備發送一次設定請求，確保同步
+        // 連線後主動請求所有設備的設定
         const seenDev = new Set<string>();
         devs.filter(d => d.mqtt_user && d.device_name).forEach(d => {
           const key = `${d.mqtt_user}|${d.device_name}`;
@@ -768,20 +773,29 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           return;
         }
 
-        // 不是上述任何一種 → 當作 status 訊息處理
-        const online = text.toLowerCase() !== "offline" && text.toLowerCase() !== "disconnected";
-        devs.forEach((d) => {
-          if (!d.mqtt_user || !d.device_name) return;
-          if (topic === `device/${d.mqtt_user}/${d.device_name}/status`) {
-            setDeviceOnlineMap((prev) => ({ ...prev, [d.id]: online }));
+        // 處理設備狀態（僅限明確的 status 主題，避免誤判）
+        if (topic.endsWith("/status")) {
+          const online = text.toLowerCase() === "online" || text.toLowerCase() === "connected";
+          const offline = text.toLowerCase() === "offline" || text.toLowerCase() === "disconnected";
+          if (online || offline) {
+            devs.forEach((d) => {
+              if (!d.mqtt_user || !d.device_name) return;
+              if (topic === `device/${d.mqtt_user}/${d.device_name}/status`) {
+                setDeviceOnlineMap((prev) => ({ ...prev, [d.id]: online }));
+              }
+            });
           }
-        });
+        }
       });
 
       client.on("error", () => {});
       client.on("close", () => {
         if (!isActive) return;
         setServerStatusMap((prev) => ({ ...prev, [no]: "Offline" }));
+        // 當 MQTT 連線中斷，將該伺服器下所有設備標記為離線
+        devs.forEach(d => {
+          setDeviceOnlineMap(prev => ({ ...prev, [d.id]: false }));
+        });
       });
       client.on("reconnect", () => {
         if (!isActive) return;
