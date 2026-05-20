@@ -668,13 +668,19 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
             localStorage.setItem(`btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`, JSON.stringify(stored));
           }
 
-          if (matchedDevs.some(d => d.id === selectedDeviceRef.current?.id)) {
+          // 更新當前選中設備的顯示（如果是共享設備且關聯此主人）
+          if (selectedDeviceRef.current?.share_from) {
+            const currentOwner = devices.find(d => !d.share_from && d.mqtt_user === selectedDeviceRef.current?.mqtt_user && d.device_name === selectedDeviceRef.current?.device_name);
+            if (currentOwner && currentOwner.id === ownerDev?.id) {
+              setTimerConfigs({ ...stored });
+            }
+          } else if (matchedDevs.some(d => d.id === selectedDeviceRef.current?.id)) {
             setTimerConfigs({ ...stored });
           }
           return;
         }
 
-        // 處理觸發區間回報（重要）
+        // 處理觸發區間回報（重要：確保共享設備即時同步）
         if (parsed?.type === "range_cfg" && Array.isArray(parsed.ranges)) {
           const matchedDevs = devs.filter(d =>
             d.mqtt_user && d.device_name &&
@@ -709,7 +715,13 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
             localStorage.setItem(`btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`, JSON.stringify(stored));
           }
 
-          if (matchedDevs.some(d => d.id === selectedDeviceRef.current?.id)) {
+          // 關鍵修正：如果當前選中的設備是共享設備且關聯此主人，則立即更新 timerConfigs
+          if (selectedDeviceRef.current?.share_from) {
+            const currentOwner = devices.find(d => !d.share_from && d.mqtt_user === selectedDeviceRef.current?.mqtt_user && d.device_name === selectedDeviceRef.current?.device_name);
+            if (currentOwner && currentOwner.id === ownerDev?.id) {
+              setTimerConfigs({ ...stored });
+            }
+          } else if (matchedDevs.some(d => d.id === selectedDeviceRef.current?.id)) {
             setTimerConfigs({ ...stored });
           }
           return;
@@ -754,7 +766,12 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
             localStorage.setItem(`btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`, JSON.stringify(stored));
           }
 
-          if (matchedDevs.some(d => d.id === selectedDeviceRef.current?.id)) {
+          if (selectedDeviceRef.current?.share_from) {
+            const currentOwner = devices.find(d => !d.share_from && d.mqtt_user === selectedDeviceRef.current?.mqtt_user && d.device_name === selectedDeviceRef.current?.device_name);
+            if (currentOwner && currentOwner.id === ownerDev?.id) {
+              setTimerConfigs({ ...stored });
+            }
+          } else if (matchedDevs.some(d => d.id === selectedDeviceRef.current?.id)) {
             setTimerConfigs({ ...stored });
           }
           return;
@@ -783,6 +800,11 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
           if (matchedDevs.some(d => d.id === selectedDeviceRef.current?.id)) {
             setBtnLabels(labels);
+          } else if (selectedDeviceRef.current?.share_from) {
+            const currentOwner = devices.find(d => !d.share_from && d.mqtt_user === selectedDeviceRef.current?.mqtt_user && d.device_name === selectedDeviceRef.current?.device_name);
+            if (currentOwner && currentOwner.id === ownerDev?.id) {
+              setBtnLabels(labels);
+            }
           }
           return;
         }
@@ -940,6 +962,9 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     const label = readBtnLabelsForDevice(device)[action] || defaultLabels[action] || action;
     setToastMsg(`已觸發「${label}」`);
     setTimeout(() => setToastMsg(null), 2500);
+
+    // 發送指令成功後，將該設備標記為在線（解決「偵測中」問題）
+    setDeviceOnlineMap(prev => ({ ...prev, [device.id]: true }));
   };
 
   const handleBtnLongPress = (action: string) => {
