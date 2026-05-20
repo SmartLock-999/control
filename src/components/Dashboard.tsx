@@ -483,6 +483,9 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         setTimeout(() => {
           client.publish(cfgTopic, JSON.stringify({ action: "get_range" }), { qos: 1 });
         }, 400);
+        setTimeout(() => {
+          client.publish(cfgTopic, JSON.stringify({ action: "get_btn_labels" }), { qos: 1 });
+        }, 600);
       }
       return;
     }
@@ -686,9 +689,10 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
             if (seen.has(key)) return;
             seen.add(key);
             const cfgTopic = `device/${d.mqtt_user}/${d.device_name}/config`;
-            client.publish(cfgTopic, JSON.stringify({ action: "get_periodic" }), { qos: 1 });
-            client.publish(cfgTopic, JSON.stringify({ action: "get_schedule" }), { qos: 1 });
-            client.publish(cfgTopic, JSON.stringify({ action: "get_range"    }), { qos: 1 });
+            client.publish(cfgTopic, JSON.stringify({ action: "get_periodic"   }), { qos: 1 });
+            client.publish(cfgTopic, JSON.stringify({ action: "get_schedule"   }), { qos: 1 });
+            client.publish(cfgTopic, JSON.stringify({ action: "get_range"      }), { qos: 1 });
+            client.publish(cfgTopic, JSON.stringify({ action: "get_btn_labels" }), { qos: 1 });
           });
         }, 1500);
       });
@@ -842,7 +846,37 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           }
           return;
         }
-        const action = parsed?.action ?? text;
+
+        // ── ESP32 回報按鈕名稱設定（btn_labels_cfg）→ 同步 state + localStorage ──
+        if (parsed?.type === "btn_labels_cfg" && parsed.labels && typeof parsed.labels === "object") {
+          const matchedDevs = devs.filter(d =>
+            d.mqtt_user && d.device_name &&
+            topic.startsWith(`device/${d.mqtt_user}/${d.device_name}/`)
+          );
+          if (!matchedDevs.length) return;
+
+          // 過濾空字串，只保留有值的 key
+          const labels: Record<string, string> = {};
+          Object.entries(parsed.labels as Record<string, string>).forEach(([k, v]) => {
+            if (typeof v === "string" && v.trim()) labels[k] = v.trim();
+          });
+
+          // 寫入 localStorage（owner row key + shared key），讓所有設備快取同步
+          const ownerDev = matchedDevs.find(d => !d.share_from);
+          if (ownerDev) {
+            try { localStorage.setItem(`btnLabels_${ownerDev.id}`, JSON.stringify(labels)); } catch {}
+          }
+          // shared key（以 mqtt_user+device_name 識別，跨帳號共享）
+          if (matchedDevs[0].mqtt_user && matchedDevs[0].device_name) {
+            try { localStorage.setItem(`btnLabels_shared_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`, JSON.stringify(labels)); } catch {}
+          }
+
+          // 目前選中的設備屬於同一實體設備 → 更新顯示
+          if (matchedDevs.some(d => d.id === selectedDeviceRef.current?.id)) {
+            setBtnLabels(labels);
+          }
+          return;
+        }
         const online = String(action).toLowerCase() !== "offline"
                     && String(action).toLowerCase() !== "disconnected";
         devs.forEach((d) => {
@@ -1034,6 +1068,27 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     if (dev?.mqtt_user && dev?.device_name) {
       try { localStorage.setItem(`btnLabels_shared_${dev.mqtt_user}_${dev.device_name}`, JSON.stringify(updated)); } catch {}
     }
+
+    // ── 同步寫入 ESP32 NVS（透過 MQTT config topic）──
+    // ESP32 收到後存入 NVS，任何設備登入後 get_btn_labels 都能讀到最新設定
+    if (dev?.mqtt_user && dev?.device_name) {
+      const no = (dev.server_no != null && dev.server_no > 0) ? dev.server_no : 1;
+      const client = mqttClientsRef.current[no];
+      if (client?.connected) {
+        const cfgTopic = `device/${dev.mqtt_user}/${dev.device_name}/config`;
+        // 寫入單一 key（set_btn_label）
+        client.publish(
+          cfgTopic,
+          JSON.stringify({
+            action: "set_btn_label",
+            key: editingBtn,
+            value: updated[editingBtn] ?? "",   // 空字串 = 清除（ESP32 端回退預設值）
+          }),
+          { qos: 1 }
+        );
+      }
+    }
+
     setEditingBtn(null);
   };
 
