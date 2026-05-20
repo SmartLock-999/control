@@ -1792,19 +1792,911 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         </div>
       </div>
 
-      {/* 以下各種 Modal 內容維持原樣，因篇幅未變更，此處省略以保持完整檔案可編譯。實際專案中請保留原有 Modal JSX。 */}
-      {showShareModal && (/* ... */) }
-      {showNameModal && (/* ... */) }
-      {showCredentials && (/* ... */) }
-      {showManageModal && (/* ... */) }
-      {showLeaveConfirm && (/* ... */) }
-      {showResetConfirm && (/* ... */) }
-      {editingBtn && (/* ... */) }
-      {showNotifyModal && notifyList.length > 0 && (/* ... */) }
-      {showSettingsPanel && (/* ... */) }
-      {showBtnMenu && (/* ... */) }
-      {showTimerModal && (/* ... */) }
-      {toastMsg && (/* ... */) }
+      {/* ══ 分享設備 Modal ══ */}
+      {showShareModal && (
+        <PortalModal>
+          <div className="fixed inset-0 bg-black/70 flex items-end justify-center" style={{ zIndex: 99999 }}
+            onClick={() => setShowShareModal(false)}>
+            <div className="bg-slate-900 border-t border-blue-500/40 rounded-t-2xl p-5 w-full max-w-lg"
+              onClick={(e) => e.stopPropagation()}>
+              <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto mb-3" />
+              <h3 className="text-sm font-bold mb-0.5">分享設備</h3>
+              <p className="text-xs text-slate-500 mb-3">
+                {displayName(selectedDevice)}・剩餘 {shareRemaining} 次
+              </p>
+              {shareError && (
+                <p className="text-xs text-red-400 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2 mb-3">
+                  {shareError}
+                </p>
+              )}
+              <label className="block text-xs text-slate-400 mb-1">對方的 Email（需已註冊）</label>
+              <input
+                type="email"
+                value={shareEmail}
+                onChange={(e) => setShareEmail(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleShare()}
+                placeholder="example@email.com"
+                className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white text-sm focus:outline-none focus:border-blue-500 mb-3"
+                autoFocus
+              />
+              <div className="flex gap-2">
+                <button onClick={() => setShowShareModal(false)}
+                  className="flex-1 py-2.5 rounded-xl border border-slate-600 text-slate-300 text-sm font-medium active:bg-slate-800">
+                  取消
+                </button>
+                <button onClick={handleShare} disabled={shareLoading}
+                  className="flex-1 py-2.5 rounded-xl bg-blue-600 text-white text-sm font-bold active:bg-blue-700 flex items-center justify-center gap-2">
+                  {shareLoading
+                    ? <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    : <><Share2 className="w-4 h-4" />確認分享</>}
+                </button>
+              </div>
+            </div>
+          </div>
+        </PortalModal>
+      )}
+
+      {/* ══ 地點命名 Modal ══ */}
+      {showNameModal && (
+        <PortalModal>
+          <div className="fixed inset-0 bg-black/70 flex items-end justify-center" style={{ zIndex: 99999 }}
+            onClick={() => setShowNameModal(false)}>
+            <div className="bg-slate-900 border-t border-purple-500/40 rounded-t-2xl p-5 w-full max-w-lg"
+              onClick={(e) => e.stopPropagation()}>
+              <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto mb-3" />
+              <h3 className="text-sm font-bold mb-1">為地點命名</h3>
+              <p className="text-xs text-slate-500 mb-3">
+                📍 {pendingLocation?.[0].toFixed(5)}, {pendingLocation?.[1].toFixed(5)}
+              </p>
+              <input
+                type="text"
+                value={pendingName}
+                onChange={(e) => setPendingName(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && confirmAddLocation()}
+                placeholder="輸入地點名稱"
+                className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white text-sm focus:outline-none focus:border-purple-500 mb-3"
+                autoFocus
+              />
+              <div className="flex gap-2">
+                <button onClick={() => { setShowNameModal(false); setPendingName(""); }}
+                  className="flex-1 py-2.5 rounded-xl border border-slate-600 text-slate-300 text-sm font-medium active:bg-slate-800">
+                  取消
+                </button>
+                <button onClick={confirmAddLocation}
+                  className="flex-1 py-2.5 rounded-xl bg-purple-600 text-white text-sm font-bold active:bg-purple-700">
+                  ✚ 新增
+                </button>
+              </div>
+            </div>
+          </div>
+        </PortalModal>
+      )}
+
+      {/* ══ 設備帳密 Sheet ══ */}
+      {showCredentials && (
+        <PortalModal>
+          <div className="fixed inset-0 bg-black/70 flex items-end justify-center" style={{ zIndex: 99999 }}
+            onClick={() => setShowCredentials(false)}>
+            <div className="bg-slate-900 border-t border-slate-700 rounded-t-2xl p-5 w-full max-w-lg"
+              onClick={(e) => e.stopPropagation()}>
+              <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto mb-3" />
+              <h3 className="text-sm font-bold mb-3">設備帳密</h3>
+              {selectedDevice ? (
+                <div className="space-y-2.5">
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">帳號</label>
+                    <div className="bg-slate-800 p-2.5 rounded-lg font-mono text-sm border border-slate-700 break-all">
+                      {selectedDevice.mqtt_user || "未設定"}
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">密碼</label>
+                    <div className="bg-slate-800 p-2.5 rounded-lg font-mono text-sm border border-slate-700 break-all">
+                      {selectedDevice.mqtt_pass || "未設定"}
+                    </div>
+                  </div>
+                </div>
+              ) : <p className="text-slate-400 text-sm">請先選擇設備</p>}
+              <button onClick={() => setShowCredentials(false)}
+                className="w-full bg-blue-600 text-white font-bold py-2.5 rounded-xl mt-4 text-sm active:bg-blue-700">
+                關閉
+              </button>
+            </div>
+          </div>
+        </PortalModal>
+      )}
+
+      {/* ══ 管理分享 Modal（主人查看被分享者，可撤銷）══ */}
+      {showManageModal && (
+        <PortalModal>
+          <div className="fixed inset-0 bg-black/70 flex items-end justify-center" style={{ zIndex: 99999 }}
+            onClick={() => setShowManageModal(false)}>
+            <div className="bg-slate-900 border-t border-purple-500/40 rounded-t-2xl p-5 w-full max-w-lg"
+              onClick={(e) => e.stopPropagation()}>
+              <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto mb-3" />
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-bold">管理分享</h3>
+                <span className="text-xs text-slate-500">{displayName(selectedDevice)}</span>
+              </div>
+
+              {manageLoading ? (
+                <div className="flex justify-center py-6">
+                  <div className="w-6 h-6 border-2 border-purple-400 border-t-transparent rounded-full animate-spin" />
+                </div>
+              ) : sharedWithList.length === 0 ? (
+                <div className="text-center py-6">
+                  <Users className="w-8 h-8 text-slate-600 mx-auto mb-2" />
+                  <p className="text-slate-500 text-sm">尚未分享給任何人</p>
+                </div>
+              ) : (
+                <div className="space-y-2 mb-3 max-h-60 overflow-y-auto">
+                  {sharedWithList.map((item) => (
+                    <div key={item.id}
+                      className="flex items-center justify-between px-3 py-2.5 bg-slate-800 rounded-xl border border-slate-700">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div className="w-2 h-2 rounded-full bg-yellow-500 flex-shrink-0" />
+                        <span className="text-sm text-slate-200 truncate">{item.user_id}</span>
+                      </div>
+                      <button
+                        onClick={() => handleRevokeShare(item)}
+                        className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-red-500/20 border border-red-500/40 text-red-400 text-xs font-medium active:bg-red-500/40 flex-shrink-0 ml-2">
+                        <UserMinus className="w-3 h-3" />撤銷
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <button onClick={() => setShowManageModal(false)}
+                className="w-full py-2.5 rounded-xl border border-slate-600 text-slate-300 text-sm font-medium active:bg-slate-800">
+                關閉
+              </button>
+            </div>
+          </div>
+        </PortalModal>
+      )}
+
+      {/* ══ 離開分享確認 Modal（被分享者）══ */}
+      {showLeaveConfirm && (
+        <PortalModal>
+          <div className="fixed inset-0 bg-black/70 flex items-end justify-center" style={{ zIndex: 99999 }}
+            onClick={() => setShowLeaveConfirm(false)}>
+            <div className="bg-slate-900 border-t border-orange-500/40 rounded-t-2xl p-5 w-full max-w-lg"
+              onClick={(e) => e.stopPropagation()}>
+              <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto mb-3" />
+              <h3 className="text-sm font-bold mb-1 text-orange-400">離開分享</h3>
+              <p className="text-slate-300 text-xs mb-0.5">
+                確定要通知主帳號移除「{displayName(selectedDevice)}」的分享？
+              </p>
+              <p className="text-slate-500 text-xs mb-4">
+                通知送出後，待主帳號確認後才會正式移除，在此之前仍可繼續使用設備。
+              </p>
+              <div className="flex gap-2">
+                <button onClick={() => setShowLeaveConfirm(false)} disabled={leaveLoading}
+                  className="flex-1 py-2.5 rounded-xl border border-slate-600 text-slate-300 text-sm font-medium active:bg-slate-800">
+                  取消
+                </button>
+                <button onClick={handleLeaveShare} disabled={leaveLoading}
+                  className="flex-1 py-2.5 rounded-xl bg-orange-600 text-white text-sm font-bold active:bg-orange-700 flex items-center justify-center gap-2">
+                  {leaveLoading
+                    ? <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    : <><UserMinus className="w-4 h-4" />通知主帳號</>}
+                </button>
+              </div>
+            </div>
+          </div>
+        </PortalModal>
+      )}
+
+      {/* ══ 重置確認 Sheet ══ */}
+      {showResetConfirm && (
+        <PortalModal>
+          <div className="fixed inset-0 bg-black/70 flex items-end justify-center" style={{ zIndex: 99999 }}
+            onClick={() => setShowResetConfirm(false)}>
+            <div className="bg-slate-900 border-t border-red-500/40 rounded-t-2xl p-5 w-full max-w-lg"
+              onClick={(e) => e.stopPropagation()}>
+              <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto mb-3" />
+              <h3 className="text-sm font-bold mb-1 text-red-400">確認重置</h3>
+              <p className="text-slate-300 text-xs mb-0.5">此操作將清除帳號下所有設備資料。</p>
+              <p className="text-slate-500 text-xs mb-4">⚠ 登入資格不受影響，重置後仍可登入。</p>
+              <div className="flex gap-2">
+                <button onClick={() => setShowResetConfirm(false)} disabled={resetting}
+                  className="flex-1 py-2.5 rounded-xl border border-slate-600 text-slate-300 text-sm font-medium active:bg-slate-800">
+                  取消
+                </button>
+                <button onClick={handleReset} disabled={resetting}
+                  className="flex-1 py-2.5 rounded-xl bg-red-600 text-white text-sm font-bold active:bg-red-700 flex items-center justify-center gap-2">
+                  {resetting
+                    ? <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    : "確認重置"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </PortalModal>
+      )}
+
+      {/* ══ 長按改名 Modal ══ */}
+      {editingBtn && (
+        <PortalModal>
+          <div className="fixed inset-0 bg-black/70 flex items-end justify-center" style={{ zIndex: 99999 }}
+            onClick={() => setEditingBtn(null)}>
+            <div className="bg-slate-900 border-t border-blue-500/40 rounded-t-2xl p-5 w-full max-w-lg"
+              onClick={(e) => e.stopPropagation()}>
+              <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto mb-3" />
+              <h3 className="text-sm font-bold mb-1">更改按鈕名稱</h3>
+              <p className="text-xs text-slate-500 mb-3">清空可還原預設名稱</p>
+              <input
+                type="text"
+                value={editBtnName}
+                onChange={(e) => setEditBtnName(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && confirmBtnRename()}
+                maxLength={12}
+                placeholder="輸入按鈕名稱"
+                className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white text-sm focus:outline-none focus:border-blue-500 mb-3"
+                autoFocus
+              />
+              <div className="flex gap-2">
+                <button onClick={() => setEditingBtn(null)}
+                  className="flex-1 py-2.5 rounded-xl border border-slate-600 text-slate-300 text-sm font-medium active:bg-slate-800">
+                  取消
+                </button>
+                <button onClick={confirmBtnRename}
+                  className="flex-1 py-2.5 rounded-xl bg-blue-600 text-white text-sm font-bold active:bg-blue-700">
+                  確認
+                </button>
+              </div>
+            </div>
+          </div>
+        </PortalModal>
+      )}
+
+      {/* ══ 刪除通知 Modal（主帳號收到被分享者要求刪除）══ */}
+      {showNotifyModal && notifyList.length > 0 && (
+        <PortalModal>
+          <div className="fixed inset-0 bg-black/80 flex items-center justify-center px-4" style={{ zIndex: 99999 }}>
+            <div className="bg-slate-900 border border-orange-500/60 rounded-2xl p-5 w-full max-w-lg shadow-2xl">
+              <div className="flex items-center gap-2 mb-4">
+                <span className="text-2xl">🔔</span>
+                <div>
+                  <h3 className="text-base font-bold text-orange-400">收到刪除分享通知</h3>
+                  <p className="text-xs text-slate-400">以下被分享者要求移除其分享</p>
+                </div>
+              </div>
+
+              <div className="space-y-3 mb-4 max-h-64 overflow-y-auto">
+                {notifyList.map((item) => {
+                  const devLabel = item.device_name_custom?.trim()
+                    || item.device_name_initial?.trim()
+                    || item.device_name;
+                  return (
+                    <div key={`${item.id}-${item.source}`}
+                      className="bg-slate-800 border border-slate-700 rounded-xl px-4 py-3">
+                      <div className="min-w-0 mb-2">
+                        <div className="flex items-center gap-2">
+                          <p className="text-sm font-semibold text-white truncate">{devLabel}</p>
+                          {item.source === "share" && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-700 text-slate-400 flex-shrink-0">保底</span>
+                          )}
+                        </div>
+                        <p className="text-xs text-orange-300 mt-0.5 truncate">
+                          {item.requesterEmail} 要求刪除分享
+                        </p>
+                      </div>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => {
+                            const remaining = notifyList.filter(
+                              (d) => !(d.id === item.id && d.source === item.source)
+                            );
+                            setNotifyList(remaining);
+                            if (remaining.length === 0) setShowNotifyModal(false);
+                          }}
+                          disabled={notifyProcessing}
+                          className="flex-1 py-2 rounded-lg border border-slate-600 text-slate-300 text-xs font-medium active:bg-slate-700">
+                          稍後處理
+                        </button>
+                        <button
+                          onClick={() => handleConfirmNotify(item)}
+                          disabled={notifyProcessing}
+                          className="flex-1 py-2 rounded-lg bg-orange-500 text-white text-xs font-bold active:bg-orange-600 flex items-center justify-center gap-1">
+                          {notifyProcessing
+                            ? <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                            : <><UserMinus className="w-3.5 h-3.5" />確認移除</>}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <button
+                onClick={() => setShowNotifyModal(false)}
+                className="w-full py-2.5 rounded-xl border border-slate-600 text-slate-300 text-sm font-medium active:bg-slate-800">
+                關閉（可在管理分享內處理）
+              </button>
+            </div>
+          </div>
+        </PortalModal>
+      )}
+
+      {/* ══ 設定面板 Sheet ══ */}
+      {showSettingsPanel && (
+        <PortalModal>
+          <div className="fixed inset-0 bg-black/70 flex items-end justify-center" style={{ zIndex: 99999 }}
+            onClick={() => setShowSettingsPanel(false)}>
+            <div className="bg-slate-900 border-t border-slate-700 rounded-t-2xl p-5 w-full max-w-lg"
+              onClick={(e) => e.stopPropagation()}>
+              <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto mb-3" />
+              <div className="flex items-center gap-2 mb-4">
+                <Settings className="w-4 h-4 text-blue-400" />
+                <h3 className="text-sm font-bold">設定</h3>
+                {selectedDevice && (
+                  <span className="text-xs text-slate-400 truncate ml-auto max-w-[160px]">
+                    {displayName(selectedDevice)}
+                  </span>
+                )}
+              </div>
+
+              <div className="space-y-2">
+                {selectedDevice && (
+                  <div className="bg-slate-800 rounded-xl border border-slate-700 px-4 py-3">
+                    <p className="text-xs text-slate-400 mb-2">設備帳密</p>
+                    <div className="space-y-1.5">
+                      <div className="flex justify-between text-xs">
+                        <span className="text-slate-500">帳號</span>
+                        <span className="text-slate-200 font-mono">{selectedDevice.mqtt_user || "未設定"}</span>
+                      </div>
+                      <div className="flex justify-between text-xs">
+                        <span className="text-slate-500">密碼</span>
+                        <span className="text-slate-200 font-mono">{selectedDevice.mqtt_pass || "未設定"}</span>
+                      </div>
+                      {selectedDevice.share_from && (
+                        <div className="flex justify-between text-xs">
+                          <span className="text-slate-500">分享者</span>
+                          <span className="text-yellow-400 truncate max-w-[160px]">{selectedDevice.share_from}</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {isOwnDevice && (
+                  <>
+                    <button
+                      onClick={() => { setShowSettingsPanel(false); setNewDeviceName(displayName(selectedDevice)); setEditingName(true); }}
+                      className="w-full flex items-center gap-3 px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl active:bg-slate-700 text-left">
+                      <Pencil className="w-4 h-4 text-slate-400 flex-shrink-0" />
+                      <div>
+                        <p className="text-sm text-slate-200">修改設備名稱</p>
+                        <p className="text-xs text-slate-500">自訂顯示名稱</p>
+                      </div>
+                    </button>
+
+                    <button
+                      onClick={() => { setShowSettingsPanel(false); setShareEmail(""); setShareError(""); setShowShareModal(true); }}
+                      disabled={(shareRemaining ?? 0) <= 0}
+                      className="w-full flex items-center gap-3 px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl active:bg-slate-700 text-left disabled:opacity-40">
+                      <Share2 className="w-4 h-4 text-blue-400 flex-shrink-0" />
+                      <div className="flex-1">
+                        <p className="text-sm text-slate-200">分享設備</p>
+                        <p className="text-xs text-slate-500">剩餘 {shareRemaining}/{MAX_SHARES} 次</p>
+                      </div>
+                    </button>
+
+                    <button
+                      onClick={() => { setShowSettingsPanel(false); openManageModal(); }}
+                      className="w-full flex items-center gap-3 px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl active:bg-slate-700 text-left">
+                      <Users className="w-4 h-4 text-purple-400 flex-shrink-0" />
+                      <div>
+                        <p className="text-sm text-slate-200">管理分享</p>
+                        <p className="text-xs text-slate-500">查看或撤銷已分享的帳號</p>
+                      </div>
+                    </button>
+
+                    <button
+                      onClick={() => { setShowSettingsPanel(false); selectedDevice && handleDeleteDevice(selectedDevice); }}
+                      className="w-full flex items-center gap-3 px-4 py-3 bg-slate-800 border border-red-500/30 rounded-xl active:bg-red-500/10 text-left">
+                      <Trash2 className="w-4 h-4 text-red-400 flex-shrink-0" />
+                      <div>
+                        <p className="text-sm text-red-400">刪除設備</p>
+                        <p className="text-xs text-slate-500">從帳號移除此設備</p>
+                      </div>
+                    </button>
+                  </>
+                )}
+
+                {selectedDevice?.share_from && (
+                  <button
+                    onClick={() => { setShowSettingsPanel(false); setShowLeaveConfirm(true); }}
+                    className="w-full flex items-center gap-3 px-4 py-3 bg-slate-800 border border-orange-500/30 rounded-xl active:bg-orange-500/10 text-left">
+                    <UserMinus className="w-4 h-4 text-orange-400 flex-shrink-0" />
+                    <div>
+                      <p className="text-sm text-orange-400">離開分享</p>
+                      <p className="text-xs text-slate-500">通知主帳號移除分享</p>
+                    </div>
+                  </button>
+                )}
+
+                <button
+                  onClick={() => { setShowSettingsPanel(false); setShowResetConfirm(true); }}
+                  className="w-full flex items-center gap-3 px-4 py-3 bg-slate-800 border border-red-500/40 rounded-xl active:bg-red-500/10 text-left">
+                  <LogOut className="w-4 h-4 text-red-500 flex-shrink-0" />
+                  <div>
+                    <p className="text-sm text-red-400 font-semibold">重置帳號</p>
+                    <p className="text-xs text-slate-500">清除所有設備資料</p>
+                  </div>
+                </button>
+              </div>
+
+              <button onClick={() => setShowSettingsPanel(false)}
+                className="w-full mt-4 py-2.5 rounded-xl border border-slate-600 text-slate-300 text-sm font-medium active:bg-slate-800">
+                關閉
+              </button>
+            </div>
+          </div>
+        </PortalModal>
+      )}
+
+      {/* ══ 按鈕長按選單 ══ */}
+      {showBtnMenu && (() => {
+        const action = showBtnMenu;
+        const defaultLabels: Record<string,string> = { open:"開", stop:"停", down:"關" };
+        const btnLabel = btnLabels[action] || defaultLabels[action] || action;
+        const cfg = timerConfigs[action];
+        const hasCfg = cfg?.active;
+        const isSharedDevice = !!selectedDevice?.share_from;
+        const fmtSec = (s: number) =>
+          s >= 3600 ? `${Math.floor(s/3600)}h${Math.floor((s%3600)/60)}m`
+                    : s >= 60   ? `${Math.floor(s/60)}m${s%60 > 0 ? `${s%60}s` : ""}` : `${s}s`;
+        const cfgSummary = () => {
+          if (!hasCfg || !cfg) return "未設定";
+          if (cfg.mode === "periodic") return `定期觸發 · 每 ${fmtSec(cfg.intervalSec ?? 60)}`;
+          if (cfg.mode === "range" && cfg.rangeOpen && cfg.rangeClose) {
+            const o = `${String(cfg.rangeOpen.hour).padStart(2,"0")}:${String(cfg.rangeOpen.minute).padStart(2,"0")}`;
+            const c = `${String(cfg.rangeClose.hour).padStart(2,"0")}:${String(cfg.rangeClose.minute).padStart(2,"0")}`;
+            return `區間 · 開 ${o} → 關 ${c}`;
+          }
+          const s = cfg.schedule;
+          if (!s) return "排程觸發（未設定）";
+          const t = `${String(s.hour).padStart(2,"0")}:${String(s.minute).padStart(2,"0")}`;
+          if (s.type === "weekday") {
+            const dayNames = ["一","二","三","四","五","六","日"];
+            const days = dayNames.filter((_,i) => (s.weekMask ?? 31) & (1<<i)).join("、");
+            return `排程 · 週${days} ${t}`;
+          }
+          const cnt = s.dates?.length ?? 0;
+          return `排程 · ${cnt} 個日期 ${t}`;
+        };
+        return (
+          <PortalModal>
+            <div className="fixed inset-0 bg-black/70 flex items-end justify-center" style={{ zIndex: 99999 }}
+              onClick={() => setShowBtnMenu(null)}>
+              <div className="bg-slate-900 border-t border-slate-700 rounded-t-2xl p-5 w-full max-w-lg"
+                onClick={e => e.stopPropagation()}>
+                <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto mb-3" />
+                <p className="text-xs text-slate-400 text-center mb-4">「{btnLabel}」設定</p>
+                <div className="space-y-2">
+                  <button onClick={() => {
+                    setShowBtnMenu(null);
+                    if (isSharedDevice) {
+                      setToastMsg("共享設備的按鈕名稱由主帳號設定");
+                      setTimeout(() => setToastMsg(null), 2500);
+                      return;
+                    }
+                    const defaultLabels2: Record<string,string> = { open:"開", stop:"停", down:"關" };
+                    setEditBtnName(btnLabels[action] || defaultLabels2[action] || "");
+                    setEditingBtn(action);
+                  }} className="w-full flex items-center gap-3 px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl active:bg-slate-700 text-left">
+                    <Pencil className="w-4 h-4 text-slate-400 flex-shrink-0" />
+                    <div>
+                      <p className="text-sm text-slate-200">修改按鈕名稱</p>
+                      <p className="text-xs text-slate-500">
+                        {isSharedDevice ? "依循主帳號設定（唯讀）" : `目前：${btnLabel}`}
+                      </p>
+                    </div>
+                    {isSharedDevice && <span className="text-[10px] bg-amber-400/20 border border-amber-400/40 text-amber-300 px-1.5 py-0.5 rounded-full flex-shrink-0">主機</span>}
+                  </button>
+                  {!isSharedDevice && (
+                    <button
+                      onClick={() => {
+                        setEditTimerMode(cfg?.mode ?? "periodic");
+                        setEditTimerSec(cfg?.intervalSec ?? 60);
+                        if (cfg?.mode === "range" && cfg.rangeOpen && cfg.rangeClose) {
+                          setEditRangeOpenHour(cfg.rangeOpen.hour);
+                          setEditRangeOpenMin(cfg.rangeOpen.minute);
+                          setEditRangeCloseHour(cfg.rangeClose.hour);
+                          setEditRangeCloseMin(cfg.rangeClose.minute);
+                          setEditSchedType("weekday");
+                          setEditSchedDays([1,2,3,4,5]);
+                          setEditSchedDates([]);
+                          setEditSchedHour(8);
+                          setEditSchedMin(0);
+                        } else if (cfg?.mode === "schedule" && cfg.schedule) {
+                          setEditSchedType(cfg.schedule.type);
+                          setEditSchedHour(cfg.schedule.hour);
+                          setEditSchedMin(cfg.schedule.minute);
+                          if (cfg.schedule.type === "weekday") {
+                            const mask = cfg.schedule.weekMask ?? 31;
+                            setEditSchedDays([1,2,3,4,5,6,7].filter(d => mask & (1<<(d-1))));
+                            setEditSchedDates([]);
+                          } else {
+                            setEditSchedDays([]);
+                            setEditSchedDates(cfg.schedule.dates ?? []);
+                          }
+                          setEditRangeOpenHour(6);  setEditRangeOpenMin(0);
+                          setEditRangeCloseHour(20); setEditRangeCloseMin(0);
+                        } else {
+                          setEditSchedType("weekday");
+                          setEditSchedDays([1,2,3,4,5]);
+                          setEditSchedDates([]);
+                          setEditSchedHour(8);
+                          setEditSchedMin(0);
+                          setEditRangeOpenHour(6);  setEditRangeOpenMin(0);
+                          setEditRangeCloseHour(20); setEditRangeCloseMin(0);
+                        }
+                        setShowTimerModal(action);
+                        setShowBtnMenu(null);
+                      }}
+                      className="w-full flex items-center gap-3 px-4 py-3 border rounded-xl text-left bg-slate-800 border-slate-700 active:bg-slate-700"
+                    >
+                      <Clock className="w-4 h-4 text-yellow-400 flex-shrink-0" />
+                      <div className="flex-1">
+                        <p className="text-sm text-slate-200">定時觸發設定</p>
+                        <p className="text-xs text-slate-500">{cfgSummary()}</p>
+                      </div>
+                      {hasCfg && (
+                        <span className="text-[10px] bg-yellow-400/20 border border-yellow-400/40 text-yellow-300 px-1.5 py-0.5 rounded-full">ON</span>
+                      )}
+                    </button>
+                  )}
+                  {isSharedDevice && (
+                    <div className="w-full flex items-center gap-3 px-4 py-3 border rounded-xl text-left bg-slate-800/60 border-amber-500/30">
+                      <Clock className="w-4 h-4 text-amber-400 flex-shrink-0" />
+                      <div className="flex-1">
+                        <p className="text-sm text-amber-200">循環 / 定時設定</p>
+                        <p className="text-xs text-slate-400">{cfgSummary()}</p>
+                      </div>
+                      <span className="text-[10px] bg-amber-400/20 border border-amber-400/40 text-amber-300 px-1.5 py-0.5 rounded-full flex-shrink-0">主機唯讀</span>
+                    </div>
+                  )}
+                  {hasCfg && !isSharedDevice && (
+                    <button onClick={() => { saveTimerConfig(action, null); setShowBtnMenu(null); }}
+                      className="w-full flex items-center gap-3 px-4 py-3 bg-slate-800 border border-red-500/30 rounded-xl active:bg-red-500/10 text-left">
+                      <X className="w-4 h-4 text-red-400 flex-shrink-0" />
+                      <p className="text-sm text-red-400">停用定時觸發</p>
+                    </button>
+                  )}
+                </div>
+                <button onClick={() => setShowBtnMenu(null)}
+                  className="w-full mt-3 py-2.5 rounded-xl border border-slate-600 text-slate-300 text-sm active:bg-slate-800">
+                  取消
+                </button>
+              </div>
+            </div>
+          </PortalModal>
+        );
+      })()}
+
+      {/* ══ 定時觸發設定 Modal ══ */}
+      {showTimerModal && (() => {
+        const action = showTimerModal;
+        const defaultLabels: Record<string,string> = { open:"開", stop:"停", down:"關" };
+        const btnLabel    = btnLabels[action] || defaultLabels[action] || action;
+        const existingCfg = timerConfigs[action];
+        const safeSec     = Math.max(2, Math.floor(editTimerSec || 0));
+        const fmtSec = (s: number) =>
+          s >= 3600 ? `${Math.floor(s/3600)} 小時 ${Math.floor((s%3600)/60)} 分鐘`
+          : s >= 60 ? `${Math.floor(s/60)} 分鐘${s%60>0?` ${s%60} 秒`:""}`
+          : `${s} 秒`;
+        const DAY_NAMES = ["一","二","三","四","五","六","日"];
+        const adjustEditTimerSec = (delta: number) =>
+          setEditTimerSec(prev => Math.max(2, Math.floor((prev || 2) + delta)));
+
+        const toggleDay = (d: number) =>
+          setEditSchedDays(prev => prev.includes(d) ? prev.filter(x=>x!==d) : [...prev,d].sort());
+
+        const addDate = (v: string) => {
+          if (!v || editSchedDates.includes(v)) return;
+          setEditSchedDates(prev => [...prev, v].sort());
+        };
+
+        const buildCfg = (): TimerCfg => {
+          if (editTimerMode === "periodic") {
+            return {
+              mode: "periodic",
+              intervalSec: safeSec,
+              periodicStartedAt: existingCfg?.mode === "periodic" && existingCfg.periodicStartedAt
+                ? existingCfg.periodicStartedAt
+                : Date.now(),
+              active: true,
+            };
+          }
+          if (editTimerMode === "range") {
+            return {
+              mode: "range",
+              active: true,
+              rangeOpen:  { hour: editRangeOpenHour,  minute: editRangeOpenMin  },
+              rangeClose: { hour: editRangeCloseHour, minute: editRangeCloseMin },
+            };
+          }
+          const mask = editSchedDays.reduce((acc, d) => acc | (1<<(d-1)), 0);
+          return {
+            mode: "schedule",
+            active: true,
+            schedule: {
+              type:     editSchedType,
+              weekMask: editSchedType === "weekday" ? mask : 0,
+              dates:    editSchedType === "date"    ? editSchedDates : [],
+              hour:     editSchedHour,
+              minute:   editSchedMin,
+            },
+          };
+        };
+
+        return (
+          <PortalModal>
+            <div className="fixed inset-0 bg-black/70 flex items-end justify-center" style={{ zIndex: 99999 }}
+              onClick={() => setShowTimerModal(null)}>
+              <div className="bg-slate-900 border-t border-yellow-500/40 rounded-t-2xl p-5 w-full max-w-lg max-h-[90vh] overflow-y-auto"
+                onClick={e => e.stopPropagation()}>
+                <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto mb-3" />
+                <div className="flex items-center gap-2 mb-1">
+                  <Clock className="w-4 h-4 text-yellow-400" />
+                  <h3 className="text-sm font-bold">定時觸發設定</h3>
+                  <span className="text-xs text-slate-400 ml-auto">「{btnLabel}」</span>
+                </div>
+
+                <p className="text-xs text-slate-400 mb-2">觸發模式</p>
+                <div className="grid grid-cols-3 gap-2 mb-4">
+                  {([
+                    { m:"periodic" as const, icon:"🔁", t:"定期觸發" },
+                    { m:"schedule" as const, icon:"📅", t:"排程觸發" },
+                    { m:"range"    as const, icon:"🕐", t:"觸發區間" },
+                  ]).map(({ m, icon, t }) => (
+                    <button key={m} onClick={() => setEditTimerMode(m)}
+                      className={`flex flex-col items-start gap-0.5 px-3 py-2.5 rounded-xl border text-left ${
+                        editTimerMode === m
+                          ? "bg-yellow-500/15 border-yellow-500 text-yellow-200"
+                          : "bg-slate-800 border-slate-700 text-slate-400 active:bg-slate-700"}`}>
+                      <span className="text-base">{icon}</span>
+                      <span className="text-xs font-semibold">{t}</span>
+                    </button>
+                  ))}
+                </div>
+
+                {editTimerMode === "periodic" && (
+                  <>
+                    <p className="text-xs text-slate-400 mb-1.5">觸發間隔（秒，需大於 1）</p>
+                    <div className="flex gap-2 mb-1.5">
+                      <button type="button" onClick={() => adjustEditTimerSec(-60)}
+                        className="w-14 py-3 rounded-xl border border-slate-700 bg-slate-800 text-slate-200 text-xs font-bold active:bg-slate-700">
+                        -1m
+                      </button>
+                      <button type="button" onClick={() => adjustEditTimerSec(-1)}
+                        className="w-12 py-3 rounded-xl border border-slate-700 bg-slate-800 text-slate-200 text-xs font-bold active:bg-slate-700">
+                        -1s
+                      </button>
+                      <input type="number" min={2} step={1}
+                        value={editTimerSec}
+                        onChange={e => setEditTimerSec(Math.max(2, parseInt(e.target.value, 10) || 2))}
+                        className="flex-1 bg-slate-800 border border-yellow-500/60 rounded-xl px-2 py-3 text-white text-sm text-center focus:outline-none focus:border-yellow-500"
+                      />
+                      <button type="button" onClick={() => adjustEditTimerSec(1)}
+                        className="w-12 py-3 rounded-xl border border-slate-700 bg-slate-800 text-slate-200 text-xs font-bold active:bg-slate-700">
+                        +1s
+                      </button>
+                      <button type="button" onClick={() => adjustEditTimerSec(60)}
+                        className="w-14 py-3 rounded-xl border border-slate-700 bg-slate-800 text-slate-200 text-xs font-bold active:bg-slate-700">
+                        +1m
+                      </button>
+                    </div>
+                    <p className="text-xs text-yellow-400/80 mb-3">→ {fmtSec(safeSec)}</p>
+                  </>
+                )}
+
+                {editTimerMode === "range" && (() => {
+                  const HourSelect = ({ value, onChange }: { value: number; onChange: (v: number) => void }) => (
+                    <select value={value} onChange={e => onChange(parseInt(e.target.value))}
+                      className="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-2 py-2.5 text-white text-sm focus:outline-none focus:border-emerald-500 appearance-none text-center">
+                      {Array.from({length:24},(_,i)=>i).map(h=>(
+                        <option key={h} value={h}>{String(h).padStart(2,"0")}</option>
+                      ))}
+                    </select>
+                  );
+                  const MinSelect = ({ value, onChange }: { value: number; onChange: (v: number) => void }) => (
+                    <select value={value} onChange={e => onChange(parseInt(e.target.value))}
+                      className="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-2 py-2.5 text-white text-sm focus:outline-none focus:border-emerald-500 appearance-none text-center">
+                      {Array.from({length:60},(_,i)=>i).map(m=>(
+                        <option key={m} value={m}>{String(m).padStart(2,"0")}</option>
+                      ))}
+                    </select>
+                  );
+                  return (
+                    <>
+                      <p className="text-xs text-slate-400 mb-1">每日自動開啟時間</p>
+                      <div className="flex items-center gap-2 mb-3 bg-slate-800/60 border border-emerald-500/30 rounded-xl px-3 py-2.5">
+                        <span className="text-emerald-400 text-sm font-bold w-5 flex-shrink-0">開</span>
+                        <HourSelect value={editRangeOpenHour}  onChange={setEditRangeOpenHour} />
+                        <span className="text-slate-400 font-bold text-lg">:</span>
+                        <MinSelect  value={editRangeOpenMin}   onChange={setEditRangeOpenMin}  />
+                        <span className="text-slate-300 text-sm font-mono ml-1">
+                          {String(editRangeOpenHour).padStart(2,"0")}:{String(editRangeOpenMin).padStart(2,"0")}
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-400 mb-1">每日自動關閉時間</p>
+                      <div className="flex items-center gap-2 mb-3 bg-slate-800/60 border border-red-500/30 rounded-xl px-3 py-2.5">
+                        <span className="text-red-400 text-sm font-bold w-5 flex-shrink-0">關</span>
+                        <HourSelect value={editRangeCloseHour} onChange={setEditRangeCloseHour} />
+                        <span className="text-slate-400 font-bold text-lg">:</span>
+                        <MinSelect  value={editRangeCloseMin}  onChange={setEditRangeCloseMin}  />
+                        <span className="text-slate-300 text-sm font-mono ml-1">
+                          {String(editRangeCloseHour).padStart(2,"0")}:{String(editRangeCloseMin).padStart(2,"0")}
+                        </span>
+                      </div>
+                      <div className="text-xs text-slate-500 bg-slate-800/50 border border-slate-700 rounded-xl px-3 py-2 mb-3">
+                        斷網期間仍可依時間自動開關，斷電後須重新設定。
+                      </div>
+                    </>
+                  );
+                })()}
+
+                {editTimerMode === "schedule" && (
+                  <>
+                    <p className="text-xs text-slate-400 mb-2">觸發日</p>
+                    <div className="grid grid-cols-2 gap-2 mb-4">
+                      {([
+                        { v:"weekday" as const, label:"工作日 / 每週重複" },
+                        { v:"date"    as const, label:"指定特定日期" },
+                      ]).map(({ v, label }) => (
+                        <button key={v} onClick={() => setEditSchedType(v)}
+                          className={`py-2 rounded-xl border text-xs font-medium ${
+                            editSchedType===v
+                              ? "bg-indigo-500/20 border-indigo-400 text-indigo-200"
+                              : "bg-slate-800 border-slate-700 text-slate-400 active:bg-slate-700"}`}>
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+
+                    {editSchedType === "weekday" && (
+                      <div className="mb-4">
+                        <div className="flex gap-1.5 justify-between mb-2">
+                          {DAY_NAMES.map((name, i) => {
+                            const d = i + 1;
+                            const on = editSchedDays.includes(d);
+                            return (
+                              <button key={d} onClick={() => toggleDay(d)}
+                                className={`flex-1 py-2 rounded-lg text-xs font-bold border ${
+                                  on ? "bg-indigo-500 border-indigo-400 text-white"
+                                     : "bg-slate-800 border-slate-700 text-slate-400 active:bg-slate-700"}`}>
+                                {name}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <div className="flex gap-2">
+                          <button onClick={() => setEditSchedDays([1,2,3,4,5])}
+                            className="text-xs text-indigo-400 px-2 py-1 bg-indigo-500/10 border border-indigo-500/30 rounded-lg active:bg-indigo-500/20">
+                            週一~五
+                          </button>
+                          <button onClick={() => setEditSchedDays([1,2,3,4,5,6,7])}
+                            className="text-xs text-indigo-400 px-2 py-1 bg-indigo-500/10 border border-indigo-500/30 rounded-lg active:bg-indigo-500/20">
+                            每天
+                          </button>
+                          <button onClick={() => setEditSchedDays([])}
+                            className="text-xs text-slate-400 px-2 py-1 bg-slate-800 border border-slate-700 rounded-lg active:bg-slate-700">
+                            清空
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {editSchedType === "date" && (
+                      <div className="mb-4">
+                        <div className="flex gap-2 mb-2">
+                          <input type="date"
+                            className="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500"
+                            onChange={e => { addDate(e.target.value); e.target.value = ""; }}
+                          />
+                          <span className="text-xs text-slate-500 self-center flex-shrink-0">選日期後自動加入</span>
+                        </div>
+                        {editSchedDates.length > 0 ? (
+                          <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
+                            {editSchedDates.map(d => (
+                              <span key={d}
+                                className="flex items-center gap-1 px-2 py-1 bg-indigo-500/20 border border-indigo-500/40 text-indigo-200 text-xs rounded-lg">
+                                {d}
+                                <button onClick={() => setEditSchedDates(prev => prev.filter(x=>x!==d))}
+                                  className="text-indigo-300 hover:text-white leading-none">×</button>
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-xs text-slate-600">尚未新增任何日期</p>
+                        )}
+                      </div>
+                    )}
+
+                    <p className="text-xs text-slate-400 mb-2">觸發時間</p>
+                    <div className="flex items-center gap-2 mb-4">
+                      <select value={editSchedHour} onChange={e => setEditSchedHour(parseInt(e.target.value))}
+                        className="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-indigo-500 appearance-none text-center">
+                        {Array.from({length:24},(_,i)=>i).map(h=>(
+                          <option key={h} value={h}>{String(h).padStart(2,"0")}</option>
+                        ))}
+                      </select>
+                      <span className="text-slate-400 font-bold text-lg">:</span>
+                      <select value={editSchedMin} onChange={e => setEditSchedMin(parseInt(e.target.value))}
+                        className="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-indigo-500 appearance-none text-center">
+                        {Array.from({length:60},(_,i)=>i).map(m=>(
+                          <option key={m} value={m}>{String(m).padStart(2,"0")}</option>
+                        ))}
+                      </select>
+                      <span className="text-slate-300 text-sm">
+                        {String(editSchedHour).padStart(2,"0")}:{String(editSchedMin).padStart(2,"0")}
+                      </span>
+                    </div>
+
+                  </>
+                )}
+
+                <div className="flex gap-2 pt-1">
+                  {existingCfg?.active && (
+                    <button onClick={() => { saveTimerConfig(action, null); setShowTimerModal(null); }}
+                      className="flex-1 py-2.5 rounded-xl bg-red-500/15 border border-red-500/40 text-red-400 text-sm active:bg-red-500/25">
+                      停用
+                    </button>
+                  )}
+                  <button onClick={() => setShowTimerModal(null)}
+                    className="flex-1 py-2.5 rounded-xl border border-slate-600 text-slate-300 text-sm active:bg-slate-800">
+                    取消
+                  </button>
+                  <button
+                    disabled={
+                      (editTimerMode==="schedule" && editSchedType==="weekday" && editSchedDays.length===0) ||
+                      (editTimerMode==="schedule" && editSchedType==="date"    && editSchedDates.length===0)
+                    }
+                    onClick={() => { saveTimerConfig(action, buildCfg()); setShowTimerModal(null); }}
+                    className="flex-1 py-2.5 rounded-xl bg-yellow-500 text-slate-900 text-sm font-bold active:bg-yellow-400 disabled:opacity-40 disabled:cursor-not-allowed">
+                    啟用
+                  </button>
+                </div>
+              </div>
+            </div>
+          </PortalModal>
+        );
+      })()}
+
+      {/* ══ Toast 觸發提示 ══ */}
+      {toastMsg && (
+        <PortalModal>
+          <div
+            className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[999999] pointer-events-none"
+            style={{ animation: "toastIn 0.2s ease" }}
+          >
+            <div className="bg-slate-800/95 border border-slate-600 text-white text-sm font-semibold
+              px-5 py-3 rounded-2xl shadow-xl flex items-center gap-2 whitespace-nowrap">
+              <span className="text-green-400 text-base">✓</span>
+              {toastMsg}
+            </div>
+          </div>
+          <style>{`
+            @keyframes toastIn {
+              from { opacity: 0; transform: translate(-50%, 16px); }
+              to   { opacity: 1; transform: translate(-50%, 0); }
+            }
+            @keyframes timerPulse {
+              0%,100% { filter: brightness(1); }
+              50%      { filter: brightness(1.35); }
+            }
+            @keyframes schedPulse {
+              0%,100% { filter: brightness(1); }
+              50%      { filter: brightness(1.25); }
+            }
+          `}</style>
+        </PortalModal>
+      )}
 
     </div>
   );
