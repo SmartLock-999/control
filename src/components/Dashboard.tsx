@@ -57,47 +57,51 @@ interface DeviceCredential {
   server_no?: number | null;
   share_from?: string | null;
   share_count: number;
-  notify?: string | null;
+  notify?: string | null;   // 被分享者要求刪除時填入，格式："{user_id}要求刪除設備"
 }
 interface SharedWithItem {
-  id: string;
-  user_id: string;
+  id: string;           // device_credentials.id of the shared row
+  user_id: string;      // 被分享者的 email
 }
+/* notify 來源兩路：
+   "owner"  = 主帳號那筆（share_from IS NULL）的 notify 有值
+   "share"  = 分享出去的 row（share_from = 主帳號）的 notify 有值（保底路）*/
 interface NotifyItem {
-  id: string;
+  id: string;                    // device_credentials.id
   source: "owner" | "share";
   device_name: string;
   device_name_custom?: string | null;
   device_name_initial?: string | null;
   mqtt_user?: string;
   mqtt_pass?: string;
-  notify: string;
-  share_count: number;
-  requesterEmail: string;
+  notify: string;                // 原始 notify 值
+  share_count: number;           // 僅 owner row 有意義
+  requesterEmail: string;        // 從 notify 解析出的要求者 email
 }
 interface SavedLocation {
   id: string;
   label: string;
   position: [number, number];
 }
+// 定時設定（存 localStorage）
 interface SchedDef {
   type: "weekday" | "date";
-  weekMask?: number;
-  dates?: string[];
+  weekMask?: number;   // bit0=週一…bit6=週日
+  dates?: string[];    // ["YYYY-MM-DD"]
   hour: number;
   minute: number;
 }
 interface TimerCfg {
   mode: "periodic" | "schedule" | "range";
-  intervalSec?: number;
-  periodicStartedAt?: number;
-  schedule?: SchedDef;
-  rangeOpen?:  { hour: number; minute: number };
-  rangeClose?: { hour: number; minute: number };
+  intervalSec?: number;   // periodic 用，允許自訂大於 1 的整數秒數
+  periodicStartedAt?: number; // periodic 開始時間（ms）
+  schedule?: SchedDef;    // schedule 用（送到 ESP32）
+  rangeOpen?:  { hour: number; minute: number }; // range 用：每日觸發開啟時間
+  rangeClose?: { hour: number; minute: number }; // range 用：每日觸發關閉時間
   active: boolean;
 }
 
-/* ─── 地圖元件 ─── */
+/* ─── 地圖子元件 ─── */
 function FlyTo({ target }: { target: [number, number] | null }) {
   const map = useMap();
   useEffect(() => { if (target) map.flyTo(target, 18, { duration: 1.0 }); }, [target, map]);
@@ -111,6 +115,7 @@ function PortalModal({ children }: { children: React.ReactNode }) {
   return createPortal(children, document.body);
 }
 
+/* 顯示名稱優先順序：device_name_custom → device_name_initial → device_name → mqtt_user */
 function displayName(d: DeviceCredential | null): string {
   if (!d) return "";
   return d.device_name_custom?.trim()
@@ -123,6 +128,14 @@ function displayName(d: DeviceCredential | null): string {
 const MAX_SHARES = 5;
 const DEFAULT_CENTER: [number, number] = [22.6273, 120.3014];
 
+/* ─── MQTT 伺服器對照表（從 DB 的 mqtt_list 載入，不寫死）─── */
+// mqtt_list 是全局設定表，不需以 user_id 篩選
+const MQTT_FALLBACK: Record<number, string> = {}; // DB 載入前暫為空
+
+/** 依 device 的 server_no 從傳入的 mqttList 取得 Broker URL；找不到時回傳 null
+ *  mqtt_list.url 可以是完整 URL 或純 hostname，本函式統一補齊格式：
+ *    hostname only  → wss://<hostname>:8884/mqtt
+ *    已有 protocol  → 原樣使用                                          */
 function getBrokerUrl(
   device: DeviceCredential | null,
   mqttList: Record<number, string>
@@ -133,7 +146,9 @@ function getBrokerUrl(
     : 1;
   const raw = mqttList[no];
   if (!raw) return null;
+  // 已有 protocol（wss:// 或 ws://）→ 直接使用
   if (/^wss?:\/\//i.test(raw)) return raw;
+  // 純 hostname → 補齊成完整 WSS URL
   return `wss://${raw}:8884/mqtt`;
 }
 
@@ -141,14 +156,18 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const [devices, setDevices]               = useState<DeviceCredential[]>([]);
   const [selectedDevice, setSelectedDevice] = useState<DeviceCredential | null>(null);
   const [loading, setLoading]               = useState(true);
+  // 伺服器連線狀態：key = server_no
   const [serverStatusMap, setServerStatusMap] = useState<Record<number, "Online"|"Offline"|"Connecting">>({});
+  // 設備在線狀態：key = device.id（依 retain status topic 判斷）
   const [deviceOnlineMap, setDeviceOnlineMap] = useState<Record<string, boolean|null>>({});
   const [showCredentials, setShowCredentials]   = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [resetting, setResetting]           = useState(false);
 
-  const [mqttList, setMqttList] = useState<Record<number, string>>({});
+  // MQTT 伺服器對照表（從 DB 載入）
+  const [mqttList, setMqttList] = useState<Record<number, string>>(MQTT_FALLBACK);
 
+  // 地圖
   const [isStreetView, setIsStreetView]       = useState(false);
   const [userPosition, setUserPosition]       = useState<[number, number] | null>(null);
   const [flyTarget, setFlyTarget]             = useState<[number, number] | null>(null);
@@ -159,64 +178,87 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const [activeLocIdx, setActiveLocIdx]       = useState(0);
   const [locationsLoaded, setLocationsLoaded] = useState(false);
 
+  // 設備改名
   const [editingName, setEditingName]   = useState(false);
   const [newDeviceName, setNewDeviceName] = useState("");
 
+  // 手動控制按壓提示
   const [triggeredAction, setTriggeredAction] = useState<string | null>(null);
+  // 觸發 toast 訊息
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
+  // 按鈕自訂名稱（依設備分開存 localStorage）
   const [btnLabels, setBtnLabels] = useState<Record<string, string>>({});
-  const [editingBtn, setEditingBtn]   = useState<string | null>(null);
+  // 長按改名 modal
+  const [editingBtn, setEditingBtn]   = useState<string | null>(null); // action key
   const [editBtnName, setEditBtnName] = useState("");
   const longPressTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // 地點命名
   const [showNameModal, setShowNameModal] = useState(false);
   const [pendingName, setPendingName]     = useState("");
 
+  // 分享設備
   const [showShareModal, setShowShareModal]   = useState(false);
   const [shareEmail, setShareEmail]           = useState("");
   const [shareLoading, setShareLoading]       = useState(false);
   const [shareError, setShareError]           = useState("");
 
+  // 管理分享（主人撤銷）
   const [showManageModal, setShowManageModal] = useState(false);
   const [sharedWithList, setSharedWithList]   = useState<SharedWithItem[]>([]);
   const [manageLoading, setManageLoading]     = useState(false);
 
+  // 離開分享（被分享者）
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
   const [leaveLoading, setLeaveLoading]         = useState(false);
 
+  // 刪除通知（主帳號收到被分享者要求刪除的通知）
   const [notifyList, setNotifyList] = useState<NotifyItem[]>([]);
   const [showNotifyModal, setShowNotifyModal] = useState(false);
   const [notifyProcessing, setNotifyProcessing] = useState(false);
 
+  // 返回鍵二次確認
   const backPressCount = React.useRef(0);
   const backPressTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // 設定面板（齒輪展開）
   const [showSettingsPanel, setShowSettingsPanel] = useState(false);
 
+  // 儲存各 server_no 的 MQTT client，供 handleControl 發布指令
   const mqttClientsRef = React.useRef<Record<number, mqtt.MqttClient>>({});
 
+  // ── 定時觸發 state ──
+  // timerConfigs 依設備獨立，key 格式：btnTimers_{deviceId}
   const timerStorageKey = useCallback((dev: DeviceCredential | null) =>
     dev ? `btnTimers_${dev.id}` : "btnTimers_nodev"
   , []);
+  // 按鈕名稱 key：分享設備也使用 owner 的 key（以 mqtt_user+device_name 識別，跨帳號共享同一份設定）
   const btnLabelStorageKey = useCallback((dev: DeviceCredential | null) => {
     if (!dev) return "btnLabels_nodev";
+    // 分享設備：改用 mqtt_user+device_name 當 key，與 owner 共用
     if (dev.share_from) return `btnLabels_shared_${dev.mqtt_user}_${dev.device_name}`;
     return `btnLabels_${dev.id}`;
   }, []);
   const lastSelectedDeviceKey = useCallback((userEmail: string) =>
     `last_selected_device_${userEmail.trim().toLowerCase()}`, []);
 
-  const [timerConfigs, setTimerConfigs] = useState<Record<string, TimerCfg>>({});
+  const [timerConfigs, setTimerConfigs] = useState<Record<string, TimerCfg>>(() => {
+    // 初始載入：等待 selectedDevice 確定後由 useEffect 重載，先給空物件
+    return {};
+  });
   const [showBtnMenu, setShowBtnMenu]               = useState<string | null>(null);
   const [showTimerModal, setShowTimerModal]         = useState<string | null>(null);
+  // periodic 編輯
   const [editTimerSec, setEditTimerSec]   = useState(60);
+  // schedule 編輯
   const [editTimerMode, setEditTimerMode]     = useState<"periodic"|"schedule"|"range">("periodic");
   const [editSchedType, setEditSchedType]     = useState<"weekday"|"date">("weekday");
-  const [editSchedDays, setEditSchedDays]     = useState<number[]>([1,2,3,4,5]);
+  const [editSchedDays, setEditSchedDays]     = useState<number[]>([1,2,3,4,5]); // 1=Mon…7=Sun
   const [editSchedDates, setEditSchedDates]   = useState<string[]>([]);
   const [editSchedHour, setEditSchedHour]     = useState(8);
   const [editSchedMin, setEditSchedMin]       = useState(0);
+  // range 編輯
   const [editRangeOpenHour,  setEditRangeOpenHour]  = useState(6);
   const [editRangeOpenMin,   setEditRangeOpenMin]   = useState(0);
   const [editRangeCloseHour, setEditRangeCloseHour] = useState(20);
@@ -225,6 +267,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const mqttListRef       = React.useRef<Record<number, string>>({});
   const readBtnLabelsForDevice = useCallback((dev: DeviceCredential | null): Record<string, string> => {
     if (!dev) return {};
+    // 分享設備：先嘗試讀取 owner 同步的 key（btnLabels_shared_），再回退到舊 key
     try { return JSON.parse(localStorage.getItem(btnLabelStorageKey(dev)) || "{}"); }
     catch { return {}; }
   }, [btnLabelStorageKey]);
@@ -237,10 +280,13 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   }, [email, lastSelectedDeviceKey]);
 
   const isOwnDevice    = !!(selectedDevice && !selectedDevice.share_from);
+  // count 本身就代表剩餘次數（每次分享 -1）
   const shareRemaining = isOwnDevice ? (selectedDevice?.share_count ?? 0) : null;
 
+  /* ── 取得設備 + 載入 MQTT 清單（同步完成，避免時序問題）── */
   const fetchDevices = useCallback(async () => {
     try {
+      // 1. 同時查詢兩張表
       const [devResult, mqttResult] = await Promise.all([
         supabase
           .from("device_credentials")
@@ -251,17 +297,22 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           .select("server_no, url"),
       ]);
 
+      // 2. 建立 server_no → url 對照表（不依賴 mqtt_list.user_id）
       const newMqttList: Record<number, string> = {};
       if (!mqttResult.error && mqttResult.data) {
         mqttResult.data.forEach((row: { server_no: number; url: string }) => {
           if (row.server_no != null && row.url) newMqttList[row.server_no] = row.url;
         });
+      } else {
+        console.warn("[mqtt_list] 查詢失敗:", mqttResult.error?.message);
       }
       setMqttList(newMqttList);
 
+      // 3. 處理設備資料
       if (devResult.error) throw devResult.error;
       const rows: any[] = devResult.data || [];
 
+      // 建立 owner count 查找表
       const ownerCountMap: Record<string, number> = {};
       rows.forEach((r) => {
         if (!r.share_from) {
@@ -284,6 +335,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         notify: r.notify ?? null,
       }));
 
+      // 4. 自動補寫 device_name_initial（只寫一次，不覆蓋既有值）
       const needsInit = mapped.filter((d) => !d.device_name_initial && d.device_name);
       if (needsInit.length > 0) {
         await Promise.all(
@@ -299,10 +351,14 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
       setDevices(mapped);
 
+      // 5. 兩路掃描 notify，建立 NotifyItem 清單
+      //    路一：主帳號 owner row（share_from IS NULL）的 notify 有值
+      //    路二：主帳號分享出去的 row（share_from = email）的 notify 有值（保底）
       const parseEmail = (n: string) => n.trim().split(/\s+/)[0] ?? "";
       const notifyItems: NotifyItem[] = [];
-      const seenKey = new Set<string>();
+      const seenKey = new Set<string>(); // 去重：requesterEmail|device_name
 
+      // 路一
       mapped
         .filter((d) => !d.share_from && d.notify)
         .forEach((d) => {
@@ -322,6 +378,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           }
         });
 
+      // 路二：查詢分享出去的 row（share_from = email）的 notify（需額外查詢）
       const { data: shareRows } = await supabase
         .from("device_credentials")
         .select("id, device_name, device_name_custom, device_name_initial, mqtt_user, mqtt_pass, notify, user_id")
@@ -378,35 +435,14 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     } catch {}
   }, [email, lastSelectedDeviceKey, selectedDevice?.id]);
 
+  /* ── refs 同步（讓 timer callback 永遠讀到最新值）── */
   useEffect(() => { selectedDeviceRef.current = selectedDevice; }, [selectedDevice]);
   useEffect(() => { mqttListRef.current = mqttList; },           [mqttList]);
   useEffect(() => {
     setBtnLabels(readBtnLabelsForDevice(selectedDevice));
   }, [readBtnLabelsForDevice, selectedDevice?.id]);
 
-  // 強制同步設備設定（不含 btn_labels，只請求 periodic/schedule/range）
-  const requestDeviceConfigs = useCallback((device: DeviceCredential | null, retryCount = 0) => {
-    if (!device?.mqtt_user || !device?.device_name) return;
-    const no = (device.server_no != null && device.server_no > 0) ? device.server_no : 1;
-    const client = mqttClientsRef.current[no];
-    if (!client || !client.connected) {
-      if (retryCount < 5) {
-        setTimeout(() => requestDeviceConfigs(device, retryCount + 1), 1000);
-      }
-      return;
-    }
-    const cfgTopic = `device/${device.mqtt_user}/${device.device_name}/config`;
-    client.publish(cfgTopic, JSON.stringify({ action: "get_periodic"   }), { qos: 1 });
-    setTimeout(() => client.publish(cfgTopic, JSON.stringify({ action: "get_schedule"   }), { qos: 1 }), 200);
-    setTimeout(() => client.publish(cfgTopic, JSON.stringify({ action: "get_range"      }), { qos: 1 }), 400);
-  }, []);
-
-  // 當設備切換時，主動請求最新設定（包含 range）
-  useEffect(() => {
-    requestDeviceConfigs(selectedDeviceRef.current);
-  }, [selectedDevice?.id, requestDeviceConfigs]);
-
-  // 當 selectedDevice 或 devices 變化時，重新整理 timerConfigs 並確保同步
+  /* ── 依目前設備載入該設備設定 ── */
   useEffect(() => {
     setShowBtnMenu(null);
     setShowTimerModal(null);
@@ -414,6 +450,8 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
 
     if (selectedDevice?.share_from) {
+      // 分享設備：先從對應的 owner row localStorage 讀取排程（避免畫面閃空）
+      // owner row 與此分享設備同 mqtt_user + device_name，但 share_from IS NULL
       const dev = selectedDevice;
       const ownerRow = devices.find(
         d => !d.share_from &&
@@ -421,26 +459,42 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
              d.device_name === dev.device_name
       );
       if (ownerRow) {
+        // owner row 的 localStorage 已有排程設定，直接顯示（常駐）
         let ownerConfigs: Record<string, TimerCfg> = {};
         try { ownerConfigs = JSON.parse(localStorage.getItem(`btnTimers_${ownerRow.id}`) || "{}"); } catch {}
         setTimerConfigs(ownerConfigs);
-        requestDeviceConfigs(ownerRow);
       } else {
+        // owner row 不在本帳號下（純被分享者），從臨時 key 讀取前次 ESP32 回報的設定
+        // 無論是否有資料都必須呼叫 setTimerConfigs，確保切換設備時清除前一個設備的殘留 timer 顯示
         let tmpConfigs: Record<string, TimerCfg> = {};
         try { tmpConfigs = JSON.parse(localStorage.getItem(`btnTimers_tmp_${dev.mqtt_user}_${dev.device_name}`) || "{}"); } catch {}
-        setTimerConfigs(tmpConfigs);
-        requestDeviceConfigs(dev);
+        setTimerConfigs(tmpConfigs); // 若 tmpConfigs 為空物件，會清除舊設備 timer badge
+        // ESP32 回報後由 MQTT message handler 再更新
       }
-    } else {
-      const key = timerStorageKey(selectedDevice);
-      let configs: Record<string, TimerCfg> = {};
-      try { configs = JSON.parse(localStorage.getItem(key) || "{}"); } catch {}
-      setTimerConfigs(configs);
-      requestDeviceConfigs(selectedDevice);
+      // 向 ESP32 請求最新設定，回報後由 MQTT message handler 更新（不清空 state，避免閃爍）
+      const no = (dev.server_no != null && dev.server_no > 0) ? dev.server_no : 1;
+      const client = mqttClientsRef.current[no];
+      if (client?.connected && dev.mqtt_user && dev.device_name) {
+        const cfgTopic = `device/${dev.mqtt_user}/${dev.device_name}/config`;
+        client.publish(cfgTopic, JSON.stringify({ action: "get_periodic" }), { qos: 1 });
+        setTimeout(() => {
+          client.publish(cfgTopic, JSON.stringify({ action: "get_schedule" }), { qos: 1 });
+        }, 200);
+        setTimeout(() => {
+          client.publish(cfgTopic, JSON.stringify({ action: "get_range" }), { qos: 1 });
+        }, 400);
+      }
+      return;
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedDevice?.id, selectedDevice?.share_from, devices, requestDeviceConfigs]);
 
+    const key = timerStorageKey(selectedDevice);
+    let configs: Record<string, TimerCfg> = {};
+    try { configs = JSON.parse(localStorage.getItem(key) || "{}"); } catch {}
+    setTimerConfigs(configs);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDevice?.id, selectedDevice?.share_from, devices]);
+
+  /* ── 登入後從 locations 資料表讀取已儲存的定位點 ── */
   useEffect(() => {
     if (locationsLoaded) return;
     const load = async () => {
@@ -472,6 +526,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [locationsLoaded]);
 
+  /* ── 登入後自動上傳 GPS 定位點至 positions，之後每 3 分鐘重複 ── */
   useEffect(() => {
     if (!navigator.geolocation) return;
 
@@ -503,11 +558,14 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       );
     };
 
+    // 立即上傳一次
     doUpload();
+    // 每 3 分鐘重複
     const timer = window.setInterval(doUpload, 3 * 60 * 1000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  /* ── 開啟頁面自動 GPS 定位 ── */
   useEffect(() => {
     if (!navigator.geolocation) return;
     setGpsLoading(true);
@@ -518,11 +576,12 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         setFlyTarget(c);
         setGpsLoading(false);
       },
-      () => setGpsLoading(false),
+      () => setGpsLoading(false),   // 靜默失敗，不顯示錯誤（自動定位）
       { enableHighAccuracy: true, timeout: 8000 }
     );
-  }, []);
+  }, []); // 只在 mount 時執行一次
 
+  /* ── Android 返回鍵二次確認 ── */
   useEffect(() => {
     const handleBackButton = () => {
       if (backPressCount.current === 0) {
@@ -533,8 +592,10 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           backPressCount.current = 0;
           setToastMsg(null);
         }, 2500);
+        // 重新 push state 讓下次還能攔截
         window.history.pushState(null, "", window.location.href);
       } else {
+        // 第二次按 → 真正離開
         if (backPressTimer.current) clearTimeout(backPressTimer.current);
         window.history.go(-2);
       }
@@ -545,12 +606,20 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       window.removeEventListener("popstate", handleBackButton);
       if (backPressTimer.current) clearTimeout(backPressTimer.current);
     };
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /* ── MQTT 連線（含伺服器狀態與設備狀態）─ 參考附件二優化狀態偵測 ── */
+  /* ── MQTT：伺服器層連線（偵測伺服器是否在線）+ 設備層 retain 訂閱（偵測設備在線）──
+     架構：
+       ① 每個 server_no 建立一條長連線（用 owner 設備憑證），監聽 connect/close 判斷伺服器狀態
+       ② 連上後訂閱所有屬於該伺服器的設備 status topic（retain），即時判斷設備在線
+     優點：
+       ● 伺服器狀態和設備狀態分開顯示
+       ● 不需要輪詢，retain 訊息連上就立刻知道
+  ── */
   useEffect(() => {
     if (!devices.length || !Object.keys(mqttList).length) return;
 
+    // 依 server_no 分組，每個 server_no 只建一條連線
     const serverGroups: Record<number, DeviceCredential[]> = {};
     devices.forEach((d) => {
       if (!d.mqtt_user || !d.mqtt_pass) return;
@@ -567,6 +636,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       const brokerUrl = getBrokerUrl(devs[0], mqttList);
       if (!brokerUrl) return;
 
+      // 用第一台 owner 設備憑證建連線（分享設備用 owner 憑證）
       const cred = devs.find((d) => !d.share_from) ?? devs[0];
       let isActive = true;
 
@@ -581,47 +651,46 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         clean: true,
       });
 
+      // 儲存 client 供 handleControl 發布指令使用
       mqttClientsRef.current[no] = client;
 
       client.on("connect", () => {
         if (!isActive) return;
         setServerStatusMap((prev) => ({ ...prev, [no]: "Online" }));
 
-        // 訂閱所有設備的 status 主題
+        // status 訂閱（逐設備 row，含 share row）
         const statusTopics = devs
           .filter((d) => d.mqtt_user && d.device_name)
           .map((d) => `device/${d.mqtt_user}/${d.device_name}/status`);
-        if (statusTopics.length) client.subscribe(statusTopics, { qos: 0 });
 
-        // 訂閱 cfg_report 主題（去重）
+        // cfg_report 訂閱：ESP32 主動回報設定時使用，依實體設備去重
+        const cfgReportTopics: string[] = [];
         const seenCfg = new Set<string>();
-        const cfgReportTopics = devs
-          .filter(d => d.mqtt_user && d.device_name)
-          .filter(d => {
-            const k = `${d.mqtt_user}|${d.device_name}`;
-            if (seenCfg.has(k)) return false;
-            seenCfg.add(k);
-            return true;
-          })
-          .map(d => `device/${d.mqtt_user}/${d.device_name}/cfg_report`);
-        if (cfgReportTopics.length) client.subscribe(cfgReportTopics, { qos: 0 });
-
-        // 連線後主動請求所有設備的設定（periodic/schedule/range）
-        const seenDev = new Set<string>();
         devs.filter(d => d.mqtt_user && d.device_name).forEach(d => {
-          const key = `${d.mqtt_user}|${d.device_name}`;
-          if (seenDev.has(key)) return;
-          seenDev.add(key);
-          const cfgTopic = `device/${d.mqtt_user}/${d.device_name}/config`;
-          // 發送三次，間隔短，確保設備能收到
-          for (let i = 0; i < 3; i++) {
-            setTimeout(() => {
-              client.publish(cfgTopic, JSON.stringify({ action: "get_periodic" }), { qos: 1 });
-              client.publish(cfgTopic, JSON.stringify({ action: "get_schedule" }), { qos: 1 });
-              client.publish(cfgTopic, JSON.stringify({ action: "get_range"    }), { qos: 1 });
-            }, i * 500);
+          const k = `${d.mqtt_user}|${d.device_name}`;
+          if (!seenCfg.has(k)) {
+            seenCfg.add(k);
+            cfgReportTopics.push(`device/${d.mqtt_user}/${d.device_name}/cfg_report`);
           }
         });
+
+        const allTopics = [...statusTopics, ...cfgReportTopics];
+        if (allTopics.length) client.subscribe(allTopics, { qos: 0 });
+
+        // 連線後查詢 ESP32 目前的循環 + 排程設定
+        // 依實體設備（mqtt_user + device_name）去重，owner / share row 共用同一台設備
+        setTimeout(() => {
+          const seen = new Set<string>();
+          devs.filter(d => d.mqtt_user && d.device_name).forEach(d => {
+            const key = `${d.mqtt_user}|${d.device_name}`;
+            if (seen.has(key)) return;
+            seen.add(key);
+            const cfgTopic = `device/${d.mqtt_user}/${d.device_name}/config`;
+            client.publish(cfgTopic, JSON.stringify({ action: "get_periodic" }), { qos: 1 });
+            client.publish(cfgTopic, JSON.stringify({ action: "get_schedule" }), { qos: 1 });
+            client.publish(cfgTopic, JSON.stringify({ action: "get_range"    }), { qos: 1 });
+          });
+        }, 1500);
       });
 
       client.on("message", (topic, payload) => {
@@ -630,20 +699,29 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         let parsed: any = null;
         try { parsed = JSON.parse(text); } catch {}
 
-        // 處理定期觸發回報
+        // ── ESP32 回報循環設定（periodic_cfg）→ 同步 state + localStorage ──
         if (parsed?.type === "periodic_cfg" && Array.isArray(parsed.periodics)) {
+          // 找到所有符合此 topic 的設備（owner row + share row 都要）
           const matchedDevs = devs.filter(d =>
             d.mqtt_user && d.device_name &&
             topic.startsWith(`device/${d.mqtt_user}/${d.device_name}/`)
           );
           if (!matchedDevs.length) return;
 
+          // localStorage 以 owner row 為基底（share row 不寫 localStorage）
           const ownerDev = matchedDevs.find(d => !d.share_from);
           let stored: Record<string, TimerCfg> = {};
           if (ownerDev) {
             try { stored = JSON.parse(localStorage.getItem(`btnTimers_${ownerDev.id}`) || "{}"); } catch {}
           } else {
-            try { stored = JSON.parse(localStorage.getItem(`btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`) || "{}"); } catch {}
+            // 純被分享者：以目前顯示中的 timerConfigs 為基底，避免其他類型設定被清掉
+            try { stored = JSON.parse(JSON.stringify(
+              selectedDeviceRef.current && matchedDevs.some(d => d.id === selectedDeviceRef.current?.id)
+                ? Object.fromEntries(Object.entries(
+                    JSON.parse(localStorage.getItem(`btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`) || "{}") as [string, TimerCfg][]
+                  ))
+                : {}
+            )); } catch {}
           }
 
           (parsed.periodics as any[]).forEach((p: any) => {
@@ -662,23 +740,20 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           });
 
           if (ownerDev) {
-            localStorage.setItem(`btnTimers_${ownerDev.id}`, JSON.stringify(stored));
+            try { localStorage.setItem(`btnTimers_${ownerDev.id}`, JSON.stringify(stored)); } catch {}
           } else {
-            localStorage.setItem(`btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`, JSON.stringify(stored));
+            // 純被分享者：暫存到臨時 key（以 mqtt_user+device_name 識別）
+            try { localStorage.setItem(`btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`, JSON.stringify(stored)); } catch {}
           }
 
-          if (selectedDeviceRef.current?.share_from) {
-            const currentOwner = devices.find(d => !d.share_from && d.mqtt_user === selectedDeviceRef.current?.mqtt_user && d.device_name === selectedDeviceRef.current?.device_name);
-            if (currentOwner && currentOwner.id === ownerDev?.id) {
-              setTimerConfigs({ ...stored });
-            }
-          } else if (matchedDevs.some(d => d.id === selectedDeviceRef.current?.id)) {
+          // 目前選中的設備屬於同一實體設備（owner 或 share row）→ 更新顯示
+          if (matchedDevs.some(d => d.id === selectedDeviceRef.current?.id)) {
             setTimerConfigs({ ...stored });
           }
           return;
         }
 
-        // 處理觸發區間回報（重要：確保共享設備即時同步）
+        // ── ESP32 回報觸發區間設定（range_cfg）→ 同步 state + localStorage ──
         if (parsed?.type === "range_cfg" && Array.isArray(parsed.ranges)) {
           const matchedDevs = devs.filter(d =>
             d.mqtt_user && d.device_name &&
@@ -708,24 +783,20 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           });
 
           if (ownerDev) {
-            localStorage.setItem(`btnTimers_${ownerDev.id}`, JSON.stringify(stored));
+            try { localStorage.setItem(`btnTimers_${ownerDev.id}`, JSON.stringify(stored)); } catch {}
           } else {
-            localStorage.setItem(`btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`, JSON.stringify(stored));
+            try { localStorage.setItem(`btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`, JSON.stringify(stored)); } catch {}
           }
 
-          if (selectedDeviceRef.current?.share_from) {
-            const currentOwner = devices.find(d => !d.share_from && d.mqtt_user === selectedDeviceRef.current?.mqtt_user && d.device_name === selectedDeviceRef.current?.device_name);
-            if (currentOwner && currentOwner.id === ownerDev?.id) {
-              setTimerConfigs({ ...stored });
-            }
-          } else if (matchedDevs.some(d => d.id === selectedDeviceRef.current?.id)) {
+          if (matchedDevs.some(d => d.id === selectedDeviceRef.current?.id)) {
             setTimerConfigs({ ...stored });
           }
           return;
         }
 
-        // 處理排程回報
+        // ── ESP32 回報排程設定（schedule_cfg）→ 同步 state + localStorage ──
         if (parsed?.type === "schedule_cfg" && Array.isArray(parsed.schedules)) {
+          // 找到所有符合此 topic 的設備（owner row + share row 都要）
           const matchedDevs = devs.filter(d =>
             d.mqtt_user && d.device_name &&
             topic.startsWith(`device/${d.mqtt_user}/${d.device_name}/`)
@@ -737,6 +808,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           if (ownerDev) {
             try { stored = JSON.parse(localStorage.getItem(`btnTimers_${ownerDev.id}`) || "{}"); } catch {}
           } else {
+            // 純被分享者：從臨時 key 讀取（含先前 periodic_cfg 合併的結果）
             try { stored = JSON.parse(localStorage.getItem(`btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`) || "{}"); } catch {}
           }
 
@@ -758,46 +830,39 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           });
 
           if (ownerDev) {
-            localStorage.setItem(`btnTimers_${ownerDev.id}`, JSON.stringify(stored));
+            try { localStorage.setItem(`btnTimers_${ownerDev.id}`, JSON.stringify(stored)); } catch {}
           } else {
-            localStorage.setItem(`btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`, JSON.stringify(stored));
+            // 純被分享者：同步更新臨時 key
+            try { localStorage.setItem(`btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`, JSON.stringify(stored)); } catch {}
           }
 
-          if (selectedDeviceRef.current?.share_from) {
-            const currentOwner = devices.find(d => !d.share_from && d.mqtt_user === selectedDeviceRef.current?.mqtt_user && d.device_name === selectedDeviceRef.current?.device_name);
-            if (currentOwner && currentOwner.id === ownerDev?.id) {
-              setTimerConfigs({ ...stored });
-            }
-          } else if (matchedDevs.some(d => d.id === selectedDeviceRef.current?.id)) {
+          // 目前選中的設備屬於同一實體設備（owner 或 share row）→ 更新顯示
+          if (matchedDevs.some(d => d.id === selectedDeviceRef.current?.id)) {
             setTimerConfigs({ ...stored });
           }
           return;
         }
-
-        // 處理設備狀態（僅限明確的 status 主題）
-        if (topic.endsWith("/status")) {
-          const online = text.toLowerCase() === "online" || text.toLowerCase() === "connected";
-          const offline = text.toLowerCase() === "offline" || text.toLowerCase() === "disconnected";
-          if (online || offline) {
-            devs.forEach((d) => {
-              if (!d.mqtt_user || !d.device_name) return;
-              if (topic === `device/${d.mqtt_user}/${d.device_name}/status`) {
-                setDeviceOnlineMap((prev) => ({ ...prev, [d.id]: online }));
-              }
-            });
+        const action = parsed?.action ?? text;
+        const online = String(action).toLowerCase() !== "offline"
+                    && String(action).toLowerCase() !== "disconnected";
+        devs.forEach((d) => {
+          if (!d.mqtt_user || !d.device_name) return;
+          if (topic === `device/${d.mqtt_user}/${d.device_name}/status`) {
+            setDeviceOnlineMap((prev) => ({ ...prev, [d.id]: online }));
           }
-        }
+        });
       });
 
-      client.on("error", () => {});
+      client.on("error", () => {
+        if (!isActive) return;
+        // error 不代表伺服器離線（可能只是 auth 問題），維持 Connecting
+      });
+
       client.on("close", () => {
         if (!isActive) return;
         setServerStatusMap((prev) => ({ ...prev, [no]: "Offline" }));
-        // 將該伺服器下所有設備標記為離線
-        devs.forEach(d => {
-          setDeviceOnlineMap(prev => ({ ...prev, [d.id]: false }));
-        });
       });
+
       client.on("reconnect", () => {
         if (!isActive) return;
         setServerStatusMap((prev) => ({ ...prev, [no]: "Connecting" }));
@@ -814,6 +879,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [devices.map((d) => d.id).join(","), JSON.stringify(mqttList)]);
 
+  /* ── 登出 ── */
   const handleLogout = async () => {
     try {
       await supabase.from("registered_emails").update({ mac: null }).eq("email", email);
@@ -822,6 +888,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     } catch (err) { console.error(err); }
   };
 
+  /* ── 重置 ── */
   const handleReset = async () => {
     setResetting(true);
     try {
@@ -833,11 +900,13 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     finally { setResetting(false); }
   };
 
+  /* ── 按鈕點擊：periodic/schedule 模式下直接手動觸發，其餘由 ESP32 排程執行 ── */
   const handleBtnClick = useCallback((action: string) => {
     handleControl(action);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /* ── 送設定到 ESP32 config topic（periodic / schedule 兩路分開）── */
   const sendScheduleToDevice = useCallback((action: string, cfg: TimerCfg | null) => {
     const dev  = selectedDeviceRef.current;
     const list = mqttListRef.current;
@@ -882,6 +951,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     }
   }, []);
 
+  /* ── 存定時設定（localStorage 設備專屬 + 精準管理此 action 計時器）── */
   const saveTimerConfig = useCallback((action: string, cfg: TimerCfg | null) => {
     const dev = selectedDeviceRef.current;
     if (dev?.share_from) {
@@ -899,6 +969,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     sendScheduleToDevice(action, cfg);
   }, [timerStorageKey, sendScheduleToDevice]);
 
+  /* ── 控制 ── */
   const handleControl = (action: string) => {
     const device = selectedDeviceRef.current ?? selectedDevice ?? devices[0] ?? null;
     if (!device?.mqtt_user || !device?.device_name) { return; }
@@ -921,18 +992,19 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     const topic = `device/${device.mqtt_user}/${device.device_name}/command`;
     const payload = JSON.stringify({ action, pin, ts: Math.floor(Date.now() / 1000) });
     client.publish(topic, payload, { qos: 1 });
+    // 按壓動畫
     setTriggeredAction(action);
     setTimeout(() => setTriggeredAction(null), 1200);
+    // 震動提示（短震）
     if (navigator.vibrate) navigator.vibrate([40, 30, 40]);
+    // Toast 提示
     const defaultLabels: Record<string, string> = { open: "開", stop: "停", down: "關" };
     const label = readBtnLabelsForDevice(device)[action] || defaultLabels[action] || action;
     setToastMsg(`已觸發「${label}」`);
     setTimeout(() => setToastMsg(null), 2500);
-
-    // 發送指令成功後，將該設備標記為在線（解決「偵測中」問題）
-    setDeviceOnlineMap(prev => ({ ...prev, [device.id]: true }));
   };
 
+  /* ── 按鈕長按 → 打開選單 ── */
   const handleBtnLongPress = (action: string) => {
     if (navigator.vibrate) navigator.vibrate(50);
     setShowBtnMenu(action);
@@ -940,6 +1012,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const confirmBtnRename = () => {
     if (!editingBtn) return;
     const dev = selectedDeviceRef.current;
+    // 分享設備：不允許修改按鈕名稱
     if (dev?.share_from) {
       setToastMsg("共享設備的按鈕名稱由主帳號設定");
       setTimeout(() => setToastMsg(null), 2500);
@@ -950,16 +1023,17 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     const trimmed = editBtnName.trim();
     const updated = { ...btnLabels };
     if (!trimmed || trimmed === defaultLabels[editingBtn]) {
-      delete updated[editingBtn];
+      delete updated[editingBtn]; // 清空 = 還原預設
     } else {
       updated[editingBtn] = trimmed;
     }
     setBtnLabels(updated);
+    // 寫入 owner key
     try { localStorage.setItem(btnLabelStorageKey(dev), JSON.stringify(updated)); } catch {}
+    // 同步寫入 shared key，讓被分享者也能讀到
     if (dev?.mqtt_user && dev?.device_name) {
       try { localStorage.setItem(`btnLabels_shared_${dev.mqtt_user}_${dev.device_name}`, JSON.stringify(updated)); } catch {}
     }
-    // 不再發送 set_btn_label 到 ESP32
     setEditingBtn(null);
   };
 
@@ -968,6 +1042,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     : sec >= 60 ? `${Math.floor(sec / 60)}m${sec % 60 > 0 ? `${sec % 60}s` : ""}`
     : `${sec}s`;
 
+  /* ── 手動 GPS ── */
   const handleLocate = () => {
     if (!navigator.geolocation) { setGpsError("不支援 GPS"); return; }
     setGpsLoading(true); setGpsError(null);
@@ -984,6 +1059,8 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     );
   };
 
+  /* ── 分享設備 ──────────────────────────────────────────────────────
+     邏輯：直接 INSERT，讓資料庫回報錯誤（不做跨帳號 RLS 查詢）         */
   const handleShare = async () => {
     if (!selectedDevice || !isOwnDevice) return;
     const target = shareEmail.trim().toLowerCase();
@@ -995,6 +1072,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     setShareLoading(true);
     setShareError("");
     try {
+      // 1. 取得 owner row
       const { data: ownerRow, error: ownerErr } = await supabase
         .from("device_credentials")
         .select("id, count")
@@ -1007,6 +1085,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
       const currentCount = parseInt(String(ownerRow.count ?? 0), 10);
 
+      // 2. 先查對方是否已有此設備（含 share_from 欄位判斷是否已分享）
       const { data: existingRow } = await supabase
         .from("device_credentials")
         .select("id, share_from")
@@ -1016,11 +1095,14 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         .maybeSingle();
 
       if (existingRow) {
+        // 已有 share_from → 代表已經分享過，禁止重複
         if (existingRow.share_from) {
           throw new Error(`「${displayName(selectedDevice)}」已分享給 ${target}，請勿重複分享`);
         }
+        // share_from 為 null → 對方是此設備的 owner，不能分享給他
         throw new Error(`${target} 本身已是此設備的擁有者，無法再分享`);
       } else {
+        // 全新分享 → INSERT
         const { error: insertErr } = await supabase
           .from("device_credentials")
           .insert({
@@ -1038,6 +1120,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         }
       }
 
+      // 3. UPDATE owner count - 1
       await supabase
         .from("device_credentials")
         .update({ count: currentCount - 1 })
@@ -1054,12 +1137,14 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     }
   };
 
+  /* ── 地點導航 ── */
   const nav = (dir: 1 | -1) => {
     if (!savedLocations.length) return;
     const i = (activeLocIdx + dir + savedLocations.length) % savedLocations.length;
     setActiveLocIdx(i); setFlyTarget(savedLocations[i].position);
   };
 
+  /* ── 新增地點命名 ── */
   const openNameModal = () => {
     if (!pendingLocation) return;
     setPendingName(`地點 ${savedLocations.length + 1}`);
@@ -1068,9 +1153,11 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const confirmAddLocation = async () => {
     if (!pendingLocation) return;
     const label = pendingName.trim() || `地點 ${savedLocations.length + 1}`;
+    // 快照座標，避免 state 清空後遺失
     const lat = pendingLocation[0];
     const lng = pendingLocation[1];
 
+    // 先更新本地 state（UI 即時反應）
     const localId = Date.now().toString();
     const newEntry: SavedLocation = { id: localId, label, position: [lat, lng] };
     const upd = [...savedLocations, newEntry];
@@ -1080,6 +1167,8 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     setPendingName("");
     setShowNameModal(false);
 
+    // 上傳至 Supabase locations 資料表
+    // locations.user_id 是 UUID 外鍵→auth.users(id)，必須用 getUser() 取得
     try {
       const { data: userData, error: userErr } = await supabase.auth.getUser();
       if (userErr || !userData?.user?.id) {
@@ -1088,12 +1177,14 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       }
       const authUserId = userData.user.id;
 
+      // radius 為 NOT NULL，給預設值 0
       const { data: inserted, error } = await supabase
         .from("locations")
         .insert({ user_id: authUserId, name: label, lat, lng, radius: 0 })
         .select("id")
         .single();
       if (!error && inserted?.id) {
+        // 用 DB 回傳的 UUID 替換本地暫時 id
         setSavedLocations((prev) =>
           prev.map((loc) => loc.id === localId ? { ...loc, id: inserted.id } : loc)
         );
@@ -1105,8 +1196,13 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     }
   };
 
+  /* ── 刪除設備 ──────────────────────────────────────────────────────────
+     主帳號刪除：同時刪除所有 share_from = email 的分享 row（連帶清除）
+     分享來的設備：不直接刪除，改為在主帳號 owner row 的 notify 欄位寫入要求，
+                   並顯示訊息提示使用者。                                  */
   const handleDeleteDevice = async (dev: DeviceCredential) => {
     if (!dev.share_from) {
+      // 主帳號刪除
       if (!confirm(`刪除「${displayName(dev)}」？此操作將同時移除所有分享。`)) return;
       try {
         await supabase
@@ -1127,6 +1223,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       setDevices(upd);
       if (selectedDevice?.id === dev.id) setSelectedDevice(upd[0] ?? null);
     } else {
+      // 被分享者：雙路寫入 notify，不直接刪除
       if (!confirm(`確定要通知主帳號刪除「${displayName(dev)}」的分享？`)) return;
       const notifyVal = `${email} "要求刪除設備"`;
       try {
@@ -1148,6 +1245,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           if (rpcErr) console.warn("[notify owner]", rpcErr.message);
         }
 
+        // 路二：直接更新被分享者自己那筆 share row 的 notify（保底）
         const { error: selfErr } = await supabase
           .from("device_credentials")
           .update({ notify: notifyVal })
@@ -1161,10 +1259,14 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     }
   };
 
+  /* ── 主帳號確認刪除通知 ──────────────────────────────────────────────
+     source="owner"：解析 requesterEmail，刪除其 share row，清空 owner notify，count+1
+     source="share" ：直接刪除該 share row（id），不需解析                */
   const handleConfirmNotify = async (item: NotifyItem) => {
     setNotifyProcessing(true);
     try {
       if (item.source === "owner") {
+        // 1a. 刪除被分享者的 share row
         const { error: delErr } = await supabase
           .from("device_credentials")
           .delete()
@@ -1174,6 +1276,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           .eq("share_from", email);
         if (delErr) throw delErr;
 
+        // 1b. 清空 owner row 的 notify，count + 1
         const { error: updErr } = await supabase
           .from("device_credentials")
           .update({ notify: null, count: item.share_count + 1 })
@@ -1181,12 +1284,14 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         if (updErr) throw updErr;
 
       } else {
+        // source="share"：直接刪除該 share row，count 歸還由 RPC 補齊
         const { error: delErr } = await supabase
           .from("device_credentials")
           .delete()
           .eq("id", item.id);
         if (delErr) throw delErr;
 
+        // 歸還主帳號 count（用 RPC 繞過 RLS）
         await supabase.rpc("return_share_count", {
           p_owner_email: email,
           p_device_name: item.device_name,
@@ -1204,27 +1309,39 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       setNotifyProcessing(false);
     }
   };
+  /* 只更新 device_name_custom，device_name 完全不動。
+     還原條件（寫入 null）：
+       ① 輸入框清空（空字串）
+       ② 輸入值等於 device_name_initial 或 device_name（原始名稱）
+     同步更新 share_from = email 的分享 row（相同 mqtt_user/pass/device_name）*/
   const handleRenameDevice = async () => {
     if (!selectedDevice) return;
     const trimmed = newDeviceName.trim();
 
+    // 原始名稱（供裝初始值 → device_name 回退）
     const originalName = (selectedDevice.device_name_initial?.trim() || selectedDevice.device_name?.trim() || "");
+
+    // 還原條件：清空 或 輸入原始名稱
     const isRestoring = trimmed === "" || trimmed === originalName;
 
+    // 若自訂名稱已相同（且非還原），直接關閉
     if (!isRestoring && trimmed === (selectedDevice.device_name_custom?.trim() ?? "")) {
       setEditingName(false);
       return;
     }
 
+    // 還原時寫 null，否則寫新名稱
     const newCustomValue: string | null = isRestoring ? null : trimmed;
 
     try {
+      // 更新自己的 row（只寫 device_name_custom）
       const { error: e1 } = await supabase
         .from("device_credentials")
         .update({ device_name_custom: newCustomValue })
         .eq("id", selectedDevice.id);
       if (e1) throw e1;
 
+      // 若是主帳號設備，同步更新所有分享 row 的 device_name_custom
       if (!selectedDevice.share_from) {
         await supabase
           .from("device_credentials")
@@ -1234,6 +1351,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           .eq("mqtt_user", selectedDevice.mqtt_user ?? "");
       }
 
+      // 更新本地 state（owner row + 同名分享 row 一併更新）
       const upd = devices.map((d) =>
         d.id === selectedDevice.id ||
         (!selectedDevice.share_from &&
@@ -1251,6 +1369,11 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     }
   };
 
+  /* ── 管理分享：載入被分享者清單 ──────────────────────────────────────
+     需要 Supabase RLS：
+     CREATE POLICY "owner can see shared rows"
+     ON public.device_credentials FOR SELECT TO authenticated
+     USING (share_from = auth.email());                                  */
   const openManageModal = async () => {
     if (!selectedDevice) return;
     setManageLoading(true);
@@ -1268,16 +1391,23 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     finally { setManageLoading(false); }
   };
 
+  /* ── 主人撤銷某人的分享 ──────────────────────────────────────────────
+     需要 Supabase RLS：
+     CREATE POLICY "owner can delete shared rows"
+     ON public.device_credentials FOR DELETE TO authenticated
+     USING (share_from = auth.email());                                  */
   const handleRevokeShare = async (item: SharedWithItem) => {
     if (!selectedDevice) return;
     if (!confirm(`撤銷對 ${item.user_id} 的分享？`)) return;
     try {
+      // DELETE 被分享者的 row
       const { error: delErr } = await supabase
         .from("device_credentials")
         .delete()
         .eq("id", item.id);
       if (delErr) throw delErr;
 
+      // UPDATE owner count + 1（恢復一次分享次數）
       const { data: ownerRow } = await supabase
         .from("device_credentials")
         .select("id, count")
@@ -1300,6 +1430,10 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     }
   };
 
+  /* ── 被分享者：自行離開分享 ────────────────────────────────────────────
+     雙路寫入 notify，不直接刪除：
+     路一：RPC 寫主帳號 owner row（繞過 RLS）
+     路二：直接更新自己的 share row（保底）                              */
   const handleLeaveShare = async () => {
     if (!selectedDevice?.share_from) return;
     setLeaveLoading(true);
@@ -1323,6 +1457,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         if (rpcErr) console.warn("[notify owner]", rpcErr.message);
       }
 
+      // 路二
       const { error: selfErr } = await supabase
         .from("device_credentials")
         .update({ notify: notifyVal })
@@ -1344,12 +1479,15 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     </div>
   );
 
+  // 選定設備的伺服器狀態
   const selServerNo = selectedDevice
     ? (selectedDevice.server_no != null && selectedDevice.server_no > 0 ? selectedDevice.server_no : 1)
     : null;
   const selServerStatus = selServerNo != null ? (serverStatusMap[selServerNo] ?? "Connecting") : "Offline";
+  // 選定設備的在線狀態（null = 尚未收到 retain 訊息）
   const selDeviceOnline = selectedDevice ? (deviceOnlineMap[selectedDevice.id] ?? null) : null;
 
+  // 顏色輔助
   const serverColor = selServerStatus === "Online"
     ? "bg-green-500"
     : selServerStatus === "Connecting" ? "bg-yellow-400 animate-pulse" : "bg-red-500";
@@ -1359,9 +1497,11 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const serverLabel = selServerStatus === "Online" ? "線上" : selServerStatus === "Connecting" ? "連線中" : "離線";
   const deviceLabel = selDeviceOnline === true ? "在線" : selDeviceOnline === false ? "離線" : "偵測中";
 
+  /* ══════════════════════════════ RENDER ══ */
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-sans select-none">
 
+      {/* ══ 頂部帳號欄（桌面 + 手機共用）══ */}
       <div className="bg-slate-900 border-b border-slate-800 px-4 py-2 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <h1 className="text-base font-bold tracking-tight">Smart Lock</h1>
@@ -1376,6 +1516,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           </div>
         </div>
         <div className="flex items-center gap-3">
+          {/* 登入帳號顯示 */}
           <span className="text-xs text-slate-400 truncate max-w-[160px] md:max-w-xs" title={email}>
             {email}
           </span>
@@ -1392,10 +1533,13 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         </div>
       </div>
 
+      {/* ══ 主體：手機單欄 / 桌面雙欄 ══ */}
       <div className="md:flex md:h-[calc(100vh-41px)] md:overflow-hidden">
 
+        {/* ── 左欄（手機全寬 / 桌面固定 360px）── */}
         <div className="md:w-[360px] md:flex-shrink-0 md:overflow-y-auto md:border-r md:border-slate-800 px-3 pt-3 pb-2">
 
+          {/* 手機版連線狀態 + 設備名稱同排 */}
           <div className="flex items-center justify-between gap-2 mb-2 md:hidden">
             <div className="flex items-center gap-1.5 flex-shrink-0">
               <span className="text-slate-600 text-xs">伺服器</span>
@@ -1413,6 +1557,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
             )}
           </div>
 
+          {/* 桌面版分享剩餘（因頂部欄空間有限，在左欄補充顯示）*/}
           {shareRemaining !== null && (
             <div className="hidden md:flex items-center justify-between mb-2 px-1">
               <span className="text-xs text-slate-500">設備控制</span>
@@ -1422,7 +1567,9 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
             </div>
           )}
 
+          {/* 設備選擇列 */}
           <div className="flex items-center gap-1.5 mb-2">
+            {/* 改名模式 */}
             {editingName && selectedDevice ? (
               <div className="flex flex-1 gap-1">
                 <input
@@ -1446,6 +1593,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                 </button>
               </div>
             ) : (
+              /* 正常模式：下拉（全寬）+ 連線狀態 + 齒輪設定 */
               <>
                 <div className="relative flex-1 min-w-0">
                   <select
@@ -1471,6 +1619,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
             )}
           </div>
 
+          {/* 手動控制 */}
           <div className="mb-2">
             <p className="text-xs text-slate-500 mb-1.5 px-0.5">
               手動控制
@@ -1497,6 +1646,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                 const hasPeriodic = cfg?.active && cfg.mode === "periodic";
                 const hasSchedule = cfg?.active && cfg.mode === "schedule";
                 const hasRange    = cfg?.active && cfg.mode === "range";
+                // 分享設備：排程設定來自 ESP32（唯讀顯示，用琥珀色區分）
                 const isSharedSched = !!(selectedDevice?.share_from && (hasPeriodic || hasSchedule || hasRange));
 
                 const fontSize = label.length <= 2 ? "1.1rem"
@@ -1507,10 +1657,12 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                   ? formatIntervalLabel(cfg.intervalSec)
                   : null;
 
+                // 排程副文字：顯示 HH:MM
                 const schedSubLabel = hasSchedule && cfg?.schedule
                   ? `${String(cfg.schedule.hour).padStart(2,"0")}:${String(cfg.schedule.minute).padStart(2,"0")}`
                   : null;
 
+                // 區間副文字：顯示 開HH:MM→關HH:MM
                 const rangeSubLabel = hasRange && cfg?.rangeOpen && cfg?.rangeClose
                   ? `${String(cfg.rangeOpen.hour).padStart(2,"0")}:${String(cfg.rangeOpen.minute).padStart(2,"0")}→${String(cfg.rangeClose.hour).padStart(2,"0")}:${String(cfg.rangeClose.minute).padStart(2,"0")}`
                   : null;
@@ -1560,7 +1712,9 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                           : `${baseColor} bg-slate-900 active:scale-95`}
                       `}
                     >
+                      {/* 主文字 */}
                       <span>{isPressed ? "✓" : label}</span>
+                      {/* 副文字：分享設備顯示「主機」前綴，提示為 owner 在 ESP32 上設定的排程 */}
                       {!isPressed && hasPeriodic && (
                         <span className={`text-[9px] font-mono leading-none mt-0.5 ${
                           isSharedSched ? "text-amber-400 opacity-80" : "opacity-60"
@@ -1583,6 +1737,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                         </span>
                       )}
                     </button>
+                    {/* 角標：分享設備用琥珀色圖示，與 owner 的藍/紫色區分 */}
                     {(hasPeriodic || hasSchedule || hasRange) && (
                       <span className={`absolute top-1 right-1 pointer-events-none flex gap-0.5 ${
                         isSharedSched ? "opacity-90" : "opacity-60"
@@ -1604,6 +1759,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
             </div>
           </div>
 
+          {/* 設備帳密快速資訊（桌面版直接顯示在左欄）*/}
           {selectedDevice && (
             <div className="hidden md:block bg-slate-800/50 rounded-xl border border-slate-700 px-3 py-2.5 mb-2">
               <p className="text-xs text-slate-500 mb-1.5">設備資訊</p>
@@ -1644,11 +1800,16 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
             </div>
           )}
 
+
+
         </div>
 
+        {/* ── 右欄（手機全寬 / 桌面佔剩餘空間）── */}
         <div className="md:flex-1 md:overflow-y-auto px-3 md:px-4 pt-0 md:pt-3 pb-4">
 
+          {/* 地圖 */}
           <div className="bg-slate-900 rounded-xl border border-slate-800 mb-2">
+            {/* 工具列 */}
             <div className="px-2.5 py-1.5 flex items-center justify-between">
               <span className="text-xs font-semibold text-slate-300">地點地圖</span>
               <div className="flex items-center gap-1">
@@ -1679,6 +1840,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
               </div>
             </div>
 
+            {/* 狀態 + 取消 */}
             <div className="px-2.5 pb-1 flex items-center justify-between gap-2 min-h-[20px]">
               <p className="text-xs text-slate-400 truncate">
                 {gpsError && !userPosition
@@ -1699,6 +1861,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
               )}
             </div>
 
+            {/* 地圖本體：手機 h-72 / 桌面佔更多高度 */}
             <div className="h-72 md:h-[520px] w-full overflow-hidden rounded-b-xl">
               <MapContainer
                 center={userPosition || DEFAULT_CENTER}
@@ -1747,6 +1910,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
             </div>
           </div>
 
+          {/* 位置設定 */}
           <div className="bg-slate-900 rounded-xl px-3 py-2 border border-slate-800 mb-2">
             <h2 className="text-xs font-bold text-slate-400 mb-1.5">位置設定</h2>
             <button onClick={openNameModal} disabled={!pendingLocation}
@@ -1769,9 +1933,11 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                     <div className="flex gap-3 ml-2 flex-shrink-0">
                       <button onClick={() => { setActiveLocIdx(idx); setFlyTarget(loc.position); }} className="text-blue-400">前往</button>
                       <button onClick={async () => {
+                        // 先從本地移除（UI 即時）
                         const upd = savedLocations.filter((_, i) => i !== idx);
                         setSavedLocations(upd);
                         setActiveLocIdx(Math.min(activeLocIdx, Math.max(0, upd.length - 1)));
+                        // 同步刪除 DB（loc.id 是 DB UUID）
                         try {
                           const { error } = await supabase
                             .from("locations")
@@ -1789,8 +1955,8 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
             )}
           </div>
 
-        </div>
-      </div>
+        </div>{/* end 右欄 */}
+      </div>{/* end 雙欄 */}
 
       {/* ══ 分享設備 Modal ══ */}
       {showShareModal && (
@@ -2139,6 +2305,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
               </div>
 
               <div className="space-y-2">
+                {/* 設備帳密 */}
                 {selectedDevice && (
                   <div className="bg-slate-800 rounded-xl border border-slate-700 px-4 py-3">
                     <p className="text-xs text-slate-400 mb-2">設備帳密</p>
@@ -2161,8 +2328,10 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                   </div>
                 )}
 
+                {/* 主帳號功能 */}
                 {isOwnDevice && (
                   <>
+                    {/* 改名 */}
                     <button
                       onClick={() => { setShowSettingsPanel(false); setNewDeviceName(displayName(selectedDevice)); setEditingName(true); }}
                       className="w-full flex items-center gap-3 px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl active:bg-slate-700 text-left">
@@ -2173,6 +2342,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                       </div>
                     </button>
 
+                    {/* 分享 */}
                     <button
                       onClick={() => { setShowSettingsPanel(false); setShareEmail(""); setShareError(""); setShowShareModal(true); }}
                       disabled={(shareRemaining ?? 0) <= 0}
@@ -2184,6 +2354,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                       </div>
                     </button>
 
+                    {/* 管理分享 */}
                     <button
                       onClick={() => { setShowSettingsPanel(false); openManageModal(); }}
                       className="w-full flex items-center gap-3 px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl active:bg-slate-700 text-left">
@@ -2194,6 +2365,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                       </div>
                     </button>
 
+                    {/* 刪除設備 */}
                     <button
                       onClick={() => { setShowSettingsPanel(false); selectedDevice && handleDeleteDevice(selectedDevice); }}
                       className="w-full flex items-center gap-3 px-4 py-3 bg-slate-800 border border-red-500/30 rounded-xl active:bg-red-500/10 text-left">
@@ -2206,6 +2378,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                   </>
                 )}
 
+                {/* 被分享者：離開分享 */}
                 {selectedDevice?.share_from && (
                   <button
                     onClick={() => { setShowSettingsPanel(false); setShowLeaveConfirm(true); }}
@@ -2218,6 +2391,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                   </button>
                 )}
 
+                {/* 重置 */}
                 <button
                   onClick={() => { setShowSettingsPanel(false); setShowResetConfirm(true); }}
                   className="w-full flex items-center gap-3 px-4 py-3 bg-slate-800 border border-red-500/40 rounded-xl active:bg-red-500/10 text-left">
@@ -2277,6 +2451,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                 <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto mb-3" />
                 <p className="text-xs text-slate-400 text-center mb-4">「{btnLabel}」設定</p>
                 <div className="space-y-2">
+                  {/* 改名 */}
                   <button onClick={() => {
                     setShowBtnMenu(null);
                     if (isSharedDevice) {
@@ -2350,6 +2525,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                       )}
                     </button>
                   )}
+                  {/* 分享設備：顯示主機的循環/定時設定（唯讀）*/}
                   {isSharedDevice && (
                     <div className="w-full flex items-center gap-3 px-4 py-3 border rounded-xl text-left bg-slate-800/60 border-amber-500/30">
                       <Clock className="w-4 h-4 text-amber-400 flex-shrink-0" />
@@ -2360,6 +2536,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                       <span className="text-[10px] bg-amber-400/20 border border-amber-400/40 text-amber-300 px-1.5 py-0.5 rounded-full flex-shrink-0">主機唯讀</span>
                     </div>
                   )}
+                  {/* 快速停用（已啟用時顯示）*/}
                   {hasCfg && !isSharedDevice && (
                     <button onClick={() => { saveTimerConfig(action, null); setShowBtnMenu(null); }}
                       className="w-full flex items-center gap-3 px-4 py-3 bg-slate-800 border border-red-500/30 rounded-xl active:bg-red-500/10 text-left">
@@ -2447,6 +2624,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                   <span className="text-xs text-slate-400 ml-auto">「{btnLabel}」</span>
                 </div>
 
+                {/* ── 模式選擇 ── */}
                 <p className="text-xs text-slate-400 mb-2">觸發模式</p>
                 <div className="grid grid-cols-3 gap-2 mb-4">
                   {([
@@ -2465,6 +2643,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                   ))}
                 </div>
 
+                {/* ── periodic ── */}
                 {editTimerMode === "periodic" && (
                   <>
                     <p className="text-xs text-slate-400 mb-1.5">觸發間隔（秒，需大於 1）</p>
@@ -2495,6 +2674,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                   </>
                 )}
 
+                {/* ── range（觸發區間）── */}
                 {editTimerMode === "range" && (() => {
                   const HourSelect = ({ value, onChange }: { value: number; onChange: (v: number) => void }) => (
                     <select value={value} onChange={e => onChange(parseInt(e.target.value))}
@@ -2541,8 +2721,10 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                   );
                 })()}
 
+                {/* ── schedule ── */}
                 {editTimerMode === "schedule" && (
                   <>
+                    {/* 日期類型 */}
                     <p className="text-xs text-slate-400 mb-2">觸發日</p>
                     <div className="grid grid-cols-2 gap-2 mb-4">
                       {([
@@ -2559,6 +2741,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                       ))}
                     </div>
 
+                    {/* weekday picker */}
                     {editSchedType === "weekday" && (
                       <div className="mb-4">
                         <div className="flex gap-1.5 justify-between mb-2">
@@ -2592,6 +2775,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                       </div>
                     )}
 
+                    {/* date picker */}
                     {editSchedType === "date" && (
                       <div className="mb-4">
                         <div className="flex gap-2 mb-2">
@@ -2618,6 +2802,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                       </div>
                     )}
 
+                    {/* 時間選擇 */}
                     <p className="text-xs text-slate-400 mb-2">觸發時間</p>
                     <div className="flex items-center gap-2 mb-4">
                       <select value={editSchedHour} onChange={e => setEditSchedHour(parseInt(e.target.value))}
@@ -2641,6 +2826,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                   </>
                 )}
 
+                {/* 按鈕列 */}
                 <div className="flex gap-2 pt-1">
                   {existingCfg?.active && (
                     <button onClick={() => { saveTimerConfig(action, null); setShowTimerModal(null); }}
@@ -2697,7 +2883,6 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           `}</style>
         </PortalModal>
       )}
-
     </div>
   );
 }
