@@ -754,7 +754,13 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         }
 
         // ── ESP32 回報觸發區間設定（range_cfg）→ 同步 state + localStorage ──
-        if (parsed?.type === "range_cfg" && Array.isArray(parsed.ranges)) {
+        const rangeItems =
+          parsed?.type === "range_cfg"
+            ? (Array.isArray(parsed.ranges)
+                ? parsed.ranges
+                : (parsed?.target ? [parsed] : null))
+            : null;
+        if (rangeItems) {
           const matchedDevs = devs.filter(d =>
             d.mqtt_user && d.device_name &&
             topic.startsWith(`device/${d.mqtt_user}/${d.device_name}/`)
@@ -769,7 +775,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
             try { stored = JSON.parse(localStorage.getItem(`btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`) || "{}"); } catch {}
           }
 
-          (parsed.ranges as any[]).forEach((r: any) => {
+          (rangeItems as any[]).forEach((r: any) => {
             const a: string = r.target;
             if (r.active) {
               stored[a] = {
