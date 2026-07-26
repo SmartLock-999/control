@@ -1,34 +1,3474 @@
 <!doctype html>
-<html lang="zh-TW">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<html lang="zh-Hant">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>3D-PA位置標註</title>
+    <style>
+        :root {
+            --bg: #eef1f6;
+            --panel: #ffffff;
+            --ink: #172033;
+            --muted: #667085;
+            --line: #e3e8f0;
+            --blue: #3b67f2;
+            --blue2: #244cc7;
+            --shadow: 0 12px 35px #1b28421a;
+        }
+        * {
+            box-sizing: border-box
+        }
+        body {
+            margin: 0;
+            font-family: Inter, "Noto Sans TC", system-ui, sans-serif;
+            color: var(--ink);
+            background: var(--bg)
+        }
+        #app {
+            display: flex;
+            height: 100dvh;
+            overflow: hidden
+        }
+        .sidebar {
+            flex: 0 0 320px;
+            width: 320px;
+            background: var(--panel);
+            border-right: 1px solid var(--line);
+            overflow-y: auto;
+            overflow-x: hidden;
+            padding: 14px 14px 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            transition: flex-basis .22s ease, width .22s ease, padding .22s ease, opacity .18s ease;
+        }
+        .sidebar.collapsed {
+            flex-basis: 0;
+            width: 0;
+            padding-left: 0;
+            padding-right: 0;
+            border-right: 0;
+            opacity: 0;
+            pointer-events: none;
+        }
+        .workspace {
+            flex: 1;
+        }
+        .sidebar-toggle {
+            position: absolute;
+            left: -13px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 26px;
+            height: 46px;
+            background: var(--panel);
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            z-index: 6;
+            box-shadow: var(--shadow);
+            color: var(--muted);
+            font-size: 13px;
+            font-weight: 700;
+            transition: left .22s ease, color .16s, border-color .16s;
+        }
+        .sidebar-toggle:hover {
+            color: var(--blue);
+            border-color: var(--blue);
+        }
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 11px;
+            margin-bottom: 2px
+        }
+        .brand-mark {
+            width: 32px;
+            height: 32px;
+            border-radius: 10px;
+            background: linear-gradient(145deg, #537fff, #2847b6);
+            display: grid;
+            place-items: center;
+            color: #fff;
+            font-weight: 800;
+            box-shadow: 0 7px 14px #3b67f244
+        }
+        .brand strong {
+            font-size: 18px;
+            letter-spacing: -.4px
+        }
+        .brand span {
+            font-size: 12px;
+            color: var(--muted);
+            display: block;
+            margin-top: 2px
+        }
+        .collapsible-section {
+            border-top: 1px solid var(--line);
+            padding-top: 8px;
+        }
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer;
+            user-select: none;
+            font-weight: 700;
+            font-size: 13px;
+            color: var(--ink);
+            padding: 2px 0;
+        }
+        .section-header:hover {
+            color: var(--blue);
+        }
+        .section-header .arrow {
+            transition: transform 0.2s;
+            font-size: 12px;
+            color: var(--muted);
+        }
+        .section-header.open .arrow {
+            transform: rotate(90deg);
+        }
+        .section-body {
+            overflow: hidden;
+            max-height: 0;
+            opacity: 0;
+            transition: max-height 0.3s ease, opacity 0.25s ease, margin 0.25s ease;
+            margin-top: 0;
+        }
+        .section-body.open {
+            max-height: 1600px;
+            opacity: 1;
+            margin-top: 10px;
+        }
+        .section-body-inner {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .field {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+        .field label {
+            font-size: 11px;
+            color: var(--muted);
+            font-weight: 500;
+        }
+        .row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 6px;
+        }
+        input,
+        select,
+        textarea {
+            width: 100%;
+            border: 1px solid #d6deeb;
+            border-radius: 7px;
+            padding: 6px 8px;
+            background: #fff;
+            color: var(--ink);
+            font: inherit;
+            font-size: 12px;
+            outline: none;
+        }
+        input:focus,
+        select:focus,
+        textarea:focus {
+            border-color: var(--blue);
+            box-shadow: 0 0 0 3px #3b67f21c;
+        }
+        textarea {
+            height: 46px;
+            resize: vertical;
+        }
+        .actions {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 6px;
+        }
+        button {
+            font: inherit;
+            font-size: 12px;
+            font-weight: 650;
+            border: 0;
+            border-radius: 7px;
+            padding: 6px 7px;
+            cursor: pointer;
+            transition: .16s;
+            background: #eef2f8;
+            color: #35415a;
+        }
+        button:hover {
+            background: #e3e9f3;
+        }
+        button.primary {
+            color: #fff;
+            background: var(--blue);
+            box-shadow: 0 5px 12px #3b67f233;
+        }
+        button.primary:hover {
+            background: var(--blue2);
+        }
+        button.full {
+            width: 100%;
+        }
+        button.danger {
+            color: #fff;
+            background: #d1455a;
+        }
+        button.danger:hover {
+            background: #b83a4d;
+        }
+        button.mode-btn.active {
+            background: var(--blue);
+            color: #fff;
+        }
+        button.mode-btn.active:hover {
+            background: var(--blue2);
+        }
+        .hint {
+            font-size: 11px;
+            line-height: 1.4;
+            color: #7b8798;
+            margin: 2px 0 0;
+        }
+        .workspace {
+            position: relative;
+            min-width: 0;
+            background: #dfe7f1;
+        }
+        .topbar {
+            position: absolute;
+            left: 18px;
+            right: 18px;
+            top: 16px;
+            height: 48px;
+            background: #fffc;
+            border: 1px solid #ffffff99;
+            backdrop-filter: blur(12px);
+            z-index: 5;
+            border-radius: 12px;
+            box-shadow: 0 5px 22px #34405914;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 8px 0 16px;
+        }
+        .title-block strong {
+            font-size: 14px;
+        }
+        .title-block span {
+            font-size: 11px;
+            color: var(--muted);
+            margin-left: 9px;
+        }
+        .search-block {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex: 1 1 auto;
+            max-width: 320px;
+            margin: 0 14px;
+            min-width: 0;
+        }
+        .search-block input {
+            flex: 1 1 auto;
+            min-width: 0;
+            height: 30px;
+            padding: 0 10px;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            font-size: 12px;
+            background: #fff;
+            color: var(--ink);
+        }
+        .search-block input:focus {
+            outline: none;
+            border-color: var(--blue);
+        }
+        .search-block button {
+            flex: 0 0 auto;
+            height: 30px;
+            padding: 0 10px;
+            background: var(--blue);
+            color: #fff;
+            border: 1px solid var(--blue);
+            border-radius: 8px;
+            font-size: 12px;
+            cursor: pointer;
+        }
+        .tools {
+            display: flex;
+            gap: 7px;
+        }
+        .tools button {
+            padding: 5px 9px;
+            background: #fff;
+            border: 1px solid var(--line);
+            font-size: 12px;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .tools button.active-tool {
+            background: var(--blue);
+            color: #fff;
+            border-color: var(--blue);
+        }
+        .canvas-wrap {
+            height: 100%;
+            width: 100%;
+            touch-action: none;
+            position: relative;
+        }
+        .annotation {
+            position: relative;
+            color: #fff;
+            background: #172033e8;
+            border: 1px solid #ffffff45;
+            border-radius: 6px;
+            padding: 3px 10px 3px 22px;
+            font: 12px Inter, sans-serif;
+            white-space: nowrap;
+            transform: translate(-50%, -100%);
+            cursor: pointer;
+            box-shadow: 0 5px 12px #0003;
+            pointer-events: auto;
+            user-select: none;
+            z-index: 10;
+        }
+        .annotation:before {
+            content: var(--symbol, "●");
+            color: var(--accent, #5f8aff);
+            position: absolute;
+            left: 6px;
+            top: 50%;
+            transform: translateY(-52%);
+            font-size: 13px;
+        }
+        .annotation:hover {
+            background: #253352;
+        }
+        .annotation.selected {
+            outline: 2px solid #ff8b36;
+            outline-offset: 2px;
+        }
+        .annotation.dragging {
+            cursor: grabbing;
+            outline: 2px dashed #ff8b36;
+            outline-offset: 3px;
+            opacity: .85;
+        }
+        .annotation .order-badge {
+            position: absolute;
+            right: -6px;
+            top: -6px;
+            background: #ff8b36;
+            color: #fff;
+            border-radius: 10px;
+            font-size: 9px;
+            font-weight: 700;
+            padding: 1px 5px;
+            line-height: 1.4;
+            border: 1px solid #fff;
+        }
+        @keyframes chainBlink {
+            0%, 100% { outline-color: #ff2d55; box-shadow: 0 0 0 5px #ff2d5555; }
+            50% { outline-color: #ff2d5500; box-shadow: 0 0 0 0px #ff2d5500; }
+        }
+        .annotation.chain-blink {
+            outline: 2px solid #ff2d55;
+            outline-offset: 2px;
+            animation: chainBlink .9s ease-in-out infinite;
+        }
+        @keyframes chainStartPulse {
+            0%, 100% { box-shadow: 0 0 10px 2px #2dd4ffaa; outline-width: 3px; }
+            50% { box-shadow: 0 0 20px 7px #2dd4ffcc; outline-width: 5px; }
+        }
+        .annotation.chain-start {
+            outline: 3px solid #2dd4ff;
+            outline-offset: 3px;
+            box-shadow: 0 0 14px #2dd4ffaa;
+            z-index: 20;
+            font-size: 15px;
+            padding: 5px 13px 5px 26px;
+            font-weight: 700;
+            animation: chainStartPulse 1.3s ease-in-out infinite;
+        }
+        .axis-move-row {
+            display: flex;
+            gap: 6px;
+            margin-top: 4px;
+        }
+        .axis-move-group {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            gap: 3px;
+            background: #f4f6fa;
+            border: 1px solid var(--line);
+            border-radius: 7px;
+            padding: 4px 5px;
+        }
+        .axis-move-group span {
+            font-size: 11px;
+            font-weight: 700;
+            color: var(--muted);
+            width: 10px;
+            text-align: center;
+        }
+        .axis-move-group input {
+            width: 0;
+            flex: 1;
+            border: none;
+            background: transparent;
+            font-size: 12px;
+            text-align: center;
+            color: var(--ink);
+        }
+        .axis-move-group input:focus {
+            outline: none;
+        }
+        .axis-btn {
+            width: 20px;
+            height: 20px;
+            border-radius: 5px;
+            border: 1px solid var(--line);
+            background: #fff;
+            color: var(--ink);
+            font-size: 13px;
+            font-weight: 700;
+            line-height: 1;
+            cursor: pointer;
+            display: grid;
+            place-items: center;
+            flex: 0 0 auto;
+        }
+        .axis-btn:hover {
+            border-color: var(--blue);
+            color: var(--blue);
+        }
+        .mode {
+            position: absolute;
+            bottom: 18px;
+            left: 18px;
+            z-index: 4;
+            background: #172033e8;
+            color: #fff;
+            border-radius: 9px;
+            font-size: 12px;
+            padding: 9px 12px;
+            pointer-events: none;
+            opacity: 0;
+            transform: translateY(8px);
+            transition: .2s;
+        }
+        .mode.show {
+            opacity: 1;
+            transform: translateY(0);
+        }
+        .legend {
+            display: none; /* 隐藏右下角提示框 */
+        }
+        .status-bar {
+            font-size: 11px;
+            color: var(--muted);
+            margin-top: 4px;
+            border-top: 1px solid var(--line);
+            padding-top: 8px;
+            text-align: center;
+        }
+        .drag-hint {
+            display: inline-block;
+            background: #3b67f2;
+            color: #fff;
+            border-radius: 4px;
+            padding: 0 6px;
+            font-size: 10px;
+            margin-left: 4px;
+        }
+        @media(max-width:780px) {
+            #app {
+                flex-direction: column;
+                height: 100dvh;
+                overflow: hidden;
+            }
+            .sidebar {
+                flex: 0 0 auto;
+                width: 100%;
+                border-right: 0;
+                border-bottom: 1px solid var(--line);
+                padding: 14px;
+                max-height: 46dvh;
+                transition: max-height .22s ease, padding .22s ease, opacity .18s ease;
+            }
+            .sidebar.collapsed {
+                width: 100%;
+                max-height: 0;
+                padding-top: 0;
+                padding-bottom: 0;
+                border-bottom: 0;
+            }
+            .sidebar-toggle {
+                left: 50%;
+                top: -13px;
+                transform: translateX(-50%);
+                width: 46px;
+                height: 26px;
+            }
+            .workspace {
+                flex: 1 1 auto;
+                min-height: 0;
+            }
+            .row {
+                grid-template-columns: 1fr 1fr;
+            }
+            .topbar {
+                top: 10px;
+                left: 10px;
+                right: 10px;
+            }
+            .title-block span {
+                display: none;
+            }
+            .tools button {
+                padding: 6px 9px;
+            }
+            .tools button .label {
+                display: none;
+            }
+            .tools button .icon {
+                font-size: 15px;
+            }
+            .search-block {
+                max-width: 120px;
+                margin: 0 6px;
+            }
+            .search-block input {
+                font-size: 11px;
+                padding: 0 6px;
+            }
+            .search-block button {
+                padding: 0 6px;
+                font-size: 11px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <main id="app">
+        <aside class="sidebar">
+            <div class="brand"><div class="brand-mark">F</div><div><strong>W513-通訊課</strong><span>PA-3D位置標註</span></div></div>
 
-    <!-- Favicon（分頁圖示）-->
-    <link rel="icon" type="image/x-icon" href="favicon.ico" />
-    <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png" />
-    <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png" />
+            <div class="collapsible-section">
+                <div class="section-header open" data-target="buildingConfig">
+                    <span>🏗️ 建築管理</span>
+                    <span class="arrow">▶</span>
+                </div>
+                <div class="section-body open" id="buildingConfig">
+                    <div class="section-body-inner">
+                        <div class="row">
+                            <div class="field"><label>樓層數</label><input id="floors" type="number" min="0" max="80" value="5" /></div>
+                            <div class="field"><label>地下室</label><input id="basements" type="number" min="0" max="10" value="0" /></div>
+                        </div>
+                        <div class="row">
+                            <div class="field"><label>寬度</label><input id="width" type="number" min="5" max="80" value="14" /></div>
+                            <div class="field"><label>外牆色</label><input id="wallColor" type="color" value="#e5e1d8" /></div>
+                        </div>
+                        <div class="field"><label>玻璃色</label><input id="glassColor" type="color" value="#557c9c" /></div>
 
-    <!-- PWA -->
-    <link rel="manifest" href="manifest.json" />
-    <meta name="theme-color" content="#020617" />
-    <meta name="mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <meta name="apple-mobile-web-app-title" content="SmartLock" />
-    <link rel="apple-touch-icon" href="icon-192.png" />
+                        <button id="generateBtn" class="primary full">生成／新增 建築</button>
 
-    <title>Smart Lock</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-    <script>
-      if ('serviceWorker' in navigator) {
-        window.addEventListener('load', () => {
-          navigator.serviceWorker.register('./sw.js').catch(() => {});
+                        <div class="actions">
+                            <button id="perspectiveBtn" class="secondary">透視樓板：關</button>
+                            <select id="lightingPreset" style="padding:6px 8px;"><option value="day">日間</option><option value="neutral">中性</option><option value="evening">黃昏</option><option value="night">夜間</option></select>
+                        </div>
+                        <button id="showOnlyBasementBtn" class="secondary full">只顯示地下室</button>
+
+                        <hr style="border-color:var(--line);margin:4px 0;">
+
+                        <div class="row">
+                            <div class="field"><label>新增建物樓層數</label><input id="newBuildingFloors" type="number" min="1" max="30" value="3" /></div>
+                            <div class="field"><label>形狀</label>
+                                <select id="buildingShape">
+                                    <option value="box">長方體</option>
+                                    <option value="cylinder">圓柱體</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="actions">
+                            <button id="footprintBtn" class="mode-btn">框選範圍</button>
+                            <button id="selectBtn" class="mode-btn">選取／刪除</button>
+                        </div>
+                        <div class="actions">
+                            <button id="moveBtn" class="mode-btn">↕ 移動</button>
+                            <button id="deleteBuildingBtn" class="secondary full" disabled>刪除已選取建物</button>
+                        </div>
+
+                        <div class="row">
+                            <button id="floorDownBtn" class="secondary">－樓層</button>
+                            <button id="floorUpBtn" class="secondary">＋樓層</button>
+                        </div>
+                        <div class="row">
+                            <button id="basementDownBtn" class="secondary">－地下室</button>
+                            <button id="basementUpBtn" class="secondary">＋地下室</button>
+                        </div>
+                        <button id="applyAppearanceBtn" class="secondary full">套用外觀設定</button>
+
+                        <div class="field">
+                            <label>縮放比例 (選取建築)</label>
+                            <input id="scaleInput" type="number" min="0.1" max="5" step="0.05" value="1" disabled />
+                        </div>
+                        <p class="hint">框選：先設定樓層數與形狀，再點地面兩對角新增建物；選取模式點擊建物；移動模式拖曳已選建物。</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="collapsible-section">
+                <div class="section-header" data-target="annotationConfig">
+                    <span>📍 標註 & 連結</span>
+                    <span class="arrow">▶</span>
+                </div>
+                <div class="section-body" id="annotationConfig">
+                    <div class="section-body-inner">
+                        <div class="row">
+                            <div class="field"><label>圖示</label>
+                                <select id="annotationIcon">
+                                    <option value="●">● 資訊</option>
+                                    <option value="⚠">⚠ 警示</option>
+                                    <option value="⌂">⌂ 入口</option>
+                                    <option value="↗">↗ 出口</option>
+                                    <option value="✚">✚ 設備</option>
+                                    <option value="♿">♿ 無障礙</option>
+                                    <option value="▣">▣ 電梯</option>
+                                    <option value="♨">♨ 消防</option>
+                                    <option value="⚡">⚡ 電力</option>
+                                    <option value="♜">♜ 保全</option>
+                                    <option value="P">P 停車</option>
+                                    <option value="★">★ 重點</option>
+                                    <option value="i">i 說明</option>
+                                    <option value="🔊">🔊 喇叭</option>
+                                    <option value="📦">📦 TB鐵箱</option>
+                                    <option value="📡">📡 無線電</option>
+                                    <option value="📹">📹 監視器</option>
+                                    <option value="🚪">🚪 門</option>
+                                    <option value="🪑">🪑 座椅</option>
+                                    <option value="🚻">🚻 廁所</option>
+                                    <option value="📞">📞 電話</option>
+                                </select>
+                            </div>
+                            <div class="field"><label>顏色</label><input id="annotationColor" type="color" value="#5f8aff" /></div>
+                        </div>
+                        <div class="field">
+                            <label>標註樓層</label>
+                            <select id="annotationFloorSelect">
+                                <option value="surface">依畫面點擊 (建物表面)</option>
+                            </select>
+                            <span class="hint">選擇樓層後，可點擊該樓層平面任意處新增標註 (以目前選取的建物為準，預設主建築)</span>
+                        </div>
+                        <div class="field"><label>標註深度</label><input id="annotationDepth" type="range" min="0" max="100" value="0" /><span id="depthValue" class="hint">0%：表層</span></div>
+                        <div class="row">
+                            <div class="field"><label>連線顏色</label><input id="lineColor" type="color" value="#ff8b36" /></div>
+                            <div class="field"><label>連線粗細</label><input id="lineWidth" type="range" min="1" max="6" value="3" step="0.5" /><span id="lineWidthValue" class="hint">3</span></div>
+                        </div>
+                        <div class="actions">
+                            <button id="annotationBtn" class="mode-btn">＋ 新增標示</button>
+                            <button id="relationBtn" class="mode-btn">🔗 單一連結</button>
+                        </div>
+                        <div class="actions">
+                            <button id="multiLinkBtn" class="mode-btn">🔗 多選連結</button>
+                            <button id="confirmMultiLinkBtn" class="primary" disabled>建立多連結</button>
+                        </div>
+                        <div class="actions">
+                            <button id="clearLinkSelectionBtn" class="secondary full" disabled>清除選取</button>
+                            <button id="deleteSelectedAnnotationsBtn" class="danger" disabled>刪除選取標註</button>
+                        </div>
+                        <div class="actions">
+                            <button id="lineSelectBtn" class="mode-btn">🖱 選取連線</button>
+                            <button id="deleteSelectedRelationsBtn" class="danger" disabled>刪除選取連線</button>
+                        </div>
+                        <div class="row">
+                            <button id="deleteSelectedAnnotationBtn" class="danger" disabled>刪除單一標註</button>
+                            <button id="deleteAllRelationsBtn" class="danger" disabled>刪除所有連線</button>
+                        </div>
+                        <button id="editAnnotationBtn" class="secondary full" disabled>編輯選取標註文字</button>
+                        <div class="field" id="axisMovePanel" style="display:none;">
+                            <label>選取標註微調 (X / Y / Z)</label>
+                            <div class="axis-move-row">
+                                <div class="axis-move-group">
+                                    <span>X</span>
+                                    <button type="button" class="axis-btn" data-axis="0" data-dir="-1">−</button>
+                                    <input id="axisMoveX" type="number" step="0.1" />
+                                    <button type="button" class="axis-btn" data-axis="0" data-dir="1">＋</button>
+                                </div>
+                                <div class="axis-move-group">
+                                    <span>Y</span>
+                                    <button type="button" class="axis-btn" data-axis="1" data-dir="-1">−</button>
+                                    <input id="axisMoveY" type="number" step="0.1" />
+                                    <button type="button" class="axis-btn" data-axis="1" data-dir="1">＋</button>
+                                </div>
+                                <div class="axis-move-group">
+                                    <span>Z</span>
+                                    <button type="button" class="axis-btn" data-axis="2" data-dir="-1">−</button>
+                                    <input id="axisMoveZ" type="number" step="0.1" />
+                                    <button type="button" class="axis-btn" data-axis="2" data-dir="1">＋</button>
+                                </div>
+                            </div>
+                            <div class="row">
+                                <div class="field"><label>移動步進</label><input id="axisMoveStep" type="number" min="0.05" step="0.05" value="0.5" /></div>
+                            </div>
+                            <span class="hint">拖曳標註點時會自動判別移動軸向：水平拖曳=X/Z、垂直拖曳=Y (高度)，無需手動點選；此面板僅供需要精確座標時使用。</span>
+                        </div>
+                        <p class="hint" id="multiLinkStatus">點擊標註點選取 (依序)</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="collapsible-section">
+                <div class="section-header" data-target="ioConfig">
+                    <span>💾 專案資料</span>
+                    <span class="arrow">▶</span>
+                </div>
+                <div class="section-body" id="ioConfig">
+                    <div class="section-body-inner">
+                        <div class="actions">
+                            <button id="exportBtn" class="secondary">下載 JSON</button>
+                            <label class="secondary" style="text-align:center;padding:8px 5px;cursor:pointer">載入 JSON<input id="importInput" type="file" accept="application/json" style="display:none;" /></label>
+                        </div>
+                        <button id="newProjectBtn" class="secondary full">🗂️ 開啟新檔</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="status-bar" id="analysisStatus">就緒 — 可調整參數後生成建築</div>
+        </aside>
+
+        <section class="workspace">
+            <button id="sidebarToggleBtn" class="sidebar-toggle" type="button" title="收合功能欄" aria-label="收合功能欄">‹</button>
+            <header class="topbar">
+                <div class="title-block"><strong id="projectFileName">3D 建築視圖</strong><span>拖曳旋轉 · 滾輪縮放</span></div>
+                <div class="search-block">
+                    <input id="annotationSearchInput" type="text" placeholder="🔍 搜尋標註點…" list="annotationSearchList" autocomplete="off" />
+                    <datalist id="annotationSearchList"></datalist>
+                    <button id="annotationSearchBtn" title="搜尋並跳至標註點">跳至</button>
+                </div>
+                <div class="tools">
+                    <button id="topMoveBtn" title="移動"><span class="icon">↕</span><span class="label">移動</span></button>
+                    <button id="topAnnotationBtn" title="標示"><span class="icon">＋</span><span class="label">標示</span></button>
+                    <button id="topDeleteBtn" title="刪除"><span class="icon">🗑</span><span class="label">刪除</span></button>
+                </div>
+            </header>
+            <div id="canvas" class="canvas-wrap"></div>
+            <div id="mode" class="mode">點擊建築表面或地面任意處以放置標示</div>
+            <!-- 右下 legend 已移除 -->
+        </section>
+    </main>
+
+    <script type="importmap">{"imports":{"three":"https://unpkg.com/three@0.164.1/build/three.module.js","three/addons/":"https://unpkg.com/three@0.164.1/examples/jsm/"}}</script>
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+
+        const $ = id => document.getElementById(id),
+            canvas = $('canvas');
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color('#dfe7f1');
+        scene.fog = new THREE.Fog('#dfe7f1', 200, 500);
+
+        const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 1000);
+        camera.position.set(42, 31, 46);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        canvas.append(renderer.domElement);
+
+        const labelRenderer = new CSS2DRenderer();
+        labelRenderer.domElement.style.position = 'absolute';
+        labelRenderer.domElement.style.inset = '0';
+        labelRenderer.domElement.style.pointerEvents = 'none';
+        canvas.append(labelRenderer.domElement);
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.target.set(0, 13, 0);
+        controls.maxPolarAngle = Math.PI;
+        controls.minDistance = 0.1;
+        controls.maxDistance = 1000;
+        controls.mouseButtons = {
+            LEFT: THREE.MOUSE.ROTATE,
+            MIDDLE: THREE.MOUSE.PAN,
+            RIGHT: THREE.MOUSE.PAN
+        };
+        controls.touches = {
+            ONE: THREE.TOUCH.ROTATE,
+            TWO: THREE.TOUCH.DOLLY_PAN
+        };
+        controls.update();
+
+        let leftButtonMode = 'rotate';
+
+        function toggleLeftButtonMode() {
+            if (leftButtonMode === 'rotate') {
+                leftButtonMode = 'pan';
+                controls.mouseButtons.LEFT = THREE.MOUSE.PAN;
+                $('analysisStatus').textContent = '左鍵平移模式 (雙擊切換)';
+            } else {
+                leftButtonMode = 'rotate';
+                controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE;
+                $('analysisStatus').textContent = '左鍵旋轉模式 (雙擊切換)';
+            }
+            controls.update();
+        }
+        renderer.domElement.addEventListener('dblclick', toggleLeftButtonMode);
+
+        const hemi = new THREE.HemisphereLight('#e9f4ff', '#7d8b92', 2.1);
+        scene.add(hemi);
+        const sun = new THREE.DirectionalLight('#fff4df', 3);
+        sun.position.set(32, 55, 25);
+        sun.castShadow = true;
+        sun.shadow.mapSize.set(1024, 1024);
+        scene.add(sun);
+
+        const groundMat = new THREE.MeshStandardMaterial({ color: '#c7d0d5', roughness: 1 });
+        const ground = new THREE.Mesh(new THREE.PlaneGeometry(600, 600), groundMat);
+        ground.rotation.x = -Math.PI / 2;
+        ground.receiveShadow = true;
+        scene.add(ground);
+
+        const grid = new THREE.GridHelper(400, 60, '#9ba9b6', '#b7c2cc');
+        grid.position.y = 0.02;
+        scene.add(grid);
+
+        const buildingsGroup = new THREE.Group();
+        scene.add(buildingsGroup);
+
+        let mainBuilding = new THREE.Group();
+        buildingsGroup.add(mainBuilding);
+
+        const additionsGroup = new THREE.Group();
+        buildingsGroup.add(additionsGroup);
+
+        const relationGroup = new THREE.Group();
+        scene.add(relationGroup);
+
+        // 供標註在地面/場地任意點使用的容器 (不隨建築物移動/縮放)
+        const groundGroup = new THREE.Group();
+        groundGroup.userData.buildingId = -1;
+        scene.add(groundGroup);
+
+        // === STATE ===
+        let annotations = [];
+        let additionPrompts = [];
+        let relations = [];
+        let annotationObjects = [];
+        let relationObjects = [];
+        let lineColor = '#ff8b36';
+        let lineWidth = 3;
+
+        let annotationMode = false,
+            xrayMode = false,
+            selectionMode = false,
+            footprintMode = false,
+            relationMode = false,
+            multiLinkMode = false,
+            moveMode = false,
+            deleteMode = false,
+            lineSelectMode = false,
+            selectedBuildings = [],
+            footprintStart = null,
+            footprintPreview = null,
+            relationStart = null,
+            selectedAnnotationIndex = -1,
+            selectedForLink = [];
+        let onlyBasement = false;
+        let selectionBoxes = [];
+        let selectedRelationIds = [];
+        let nextRelationId = 1;
+        let markerDragIndex = -1;
+        let markerDragStartScreen = null;
+        let markerDragStartWorldPos = null;
+        let markerDragAxisMode = null; // 'horizontal' (X/Z) 或 'vertical' (Y)，由拖曳方向自動判別
+        let highlightedChain = { prevIndex: -1, nextIndex: -1, prevRelationId: null, nextRelationId: null, startIndex: -1 };
+        const LINE_REFERENCE_DISTANCE = 40; // 連線視覺粗細的基準攝影機距離，用於縮放視角自動校正
+
+        let isDragging = false;
+        let dragTarget = null;
+        let dragOffset = new THREE.Vector3();
+        let dragStartPos = new THREE.Vector3();
+
+        let nextBuildingId = 1;
+
+        const raycaster = new THREE.Raycaster(),
+            pointer = new THREE.Vector2();
+        raycaster.params.Line = raycaster.params.Line || {};
+        raycaster.params.Line.threshold = 0.6;
+
+        const STORY_HEIGHT = 3.35; // 需與 createBuilding 中樓層高度保持一致
+
+        function hex(v) { return new THREE.Color(v) }
+
+        function mesh(geo, material, x, y, z, parent) {
+            const o = new THREE.Mesh(geo, material);
+            o.position.set(x, y, z);
+            o.castShadow = o.receiveShadow = true;
+            parent.add(o);
+            return o;
+        }
+
+        // 核心：生成建築物（風格固定為現代，屋頂固定為平屋頂）
+        function createBuilding(floors, basements, width, wallColor, glassColor, isMain = true, shape = 'box', customDepth = null) {
+            const group = new THREE.Group();
+            const w = Math.max(5, width || 14);
+            const d = shape === 'cylinder' ? w : (customDepth || w * 0.67);
+            const h = STORY_HEIGHT;
+
+            const wallColorHex = hex(wallColor || '#e5e1d8');
+            const glassColorHex = hex(glassColor || '#557c9c');
+
+            const wallMat = new THREE.MeshStandardMaterial({ color: wallColorHex, roughness: 0.5, metalness: 0.2 });
+            const glassMat = new THREE.MeshStandardMaterial({ color: glassColorHex, roughness: 0.1, metalness: 0.6, transparent: true, opacity: 0.7 });
+            const trimMat = new THREE.MeshStandardMaterial({ color: '#b0b8c0', roughness: 0.4 });
+            const floorMat = new THREE.MeshStandardMaterial({ color: '#c5b5a0', roughness: 0.8 });
+            const darkMat = new THREE.MeshStandardMaterial({ color: '#3a4a5a', roughness: 0.6 });
+
+            wallMat.name = 'wall';
+            glassMat.name = 'glass';
+            trimMat.name = 'trim';
+            floorMat.name = 'floor';
+            darkMat.name = 'trim';
+
+            const totalFloors = floors + basements;
+            if (totalFloors === 0) return group;
+
+            const isCylinder = shape === 'cylinder';
+
+            for (let f = -basements; f < floors; f++) {
+                const y = f * h + h / 2;
+                
+                if (f >= 0) {
+                    const mat = wallMat.clone();
+                    mat.transparent = false;
+                    mat.opacity = 1;
+                    if (isCylinder) {
+                        mesh(new THREE.CylinderGeometry(w/2, w/2, h - 0.09, 24), mat, 0, y, 0, group);
+                    } else {
+                        mesh(new THREE.BoxGeometry(w, h - 0.09, d), mat, 0, y, 0, group);
+                    }
+                } else {
+                    const bw = new THREE.MeshStandardMaterial({ color: '#4a5a6a', roughness: 0.8, transparent: true, opacity: 0.5 });
+                    bw.name = 'wall';
+                    let bMesh;
+                    if (isCylinder) {
+                        bMesh = mesh(new THREE.CylinderGeometry(w/2, w/2, h - 0.09, 24), bw, 0, y, 0, group);
+                    } else {
+                        bMesh = mesh(new THREE.BoxGeometry(w, h - 0.09, d), bw, 0, y, 0, group);
+                    }
+                    bMesh.userData.isBasement = true;
+                }
+
+                const floorY = (f + 1) * h - 0.18;
+                if (isCylinder) {
+                    mesh(new THREE.CylinderGeometry(w/2 - 0.12, w/2 - 0.12, 0.18, 24), floorMat, 0, floorY, 0, group);
+                } else {
+                    mesh(new THREE.BoxGeometry(w - 0.25, 0.18, d - 0.25), floorMat, 0, floorY, 0, group);
+                }
+
+                if (f === -basements && basements > 0) {
+                    const bottomY = -basements * h + 0.18;
+                    if (isCylinder) {
+                        mesh(new THREE.CylinderGeometry(w/2 - 0.12, w/2 - 0.12, 0.18, 24), floorMat, 0, bottomY, 0, group);
+                    } else {
+                        mesh(new THREE.BoxGeometry(w - 0.25, 0.18, d - 0.25), floorMat, 0, bottomY, 0, group);
+                    }
+                }
+
+                if (f >= 0 && floors > 0 && !isCylinder) {
+                    const cols = Math.max(3, Math.floor(w / 4.1));
+                    for (let c = 0; c < cols; c++) {
+                        const x = -w / 2 + (c + 0.5) * w / cols;
+                        mesh(new THREE.BoxGeometry(w / cols - 0.55, 1.48, 0.09), glassMat, x, y + 0.08, d / 2 + 0.055, group);
+                        mesh(new THREE.BoxGeometry(w / cols - 0.55, 1.48, 0.09), glassMat, x, y + 0.08, -d / 2 - 0.055, group);
+                    }
+                    const sides = Math.max(2, Math.floor(d / 4.1));
+                    for (let c = 0; c < sides; c++) {
+                        const z = -d / 2 + (c + 0.5) * d / sides;
+                        mesh(new THREE.BoxGeometry(0.09, 1.48, d / sides - 0.55), glassMat, w / 2 + 0.055, y + 0.08, z, group);
+                        mesh(new THREE.BoxGeometry(0.09, 1.48, d / sides - 0.55), glassMat, -w / 2 - 0.055, y + 0.08, z, group);
+                    }
+                }
+                
+                if (isCylinder) {
+                    mesh(new THREE.CylinderGeometry(w/2 + 0.2, w/2 + 0.2, 0.13, 24), darkMat, 0, (f + 1) * h - 0.08, 0, group);
+                } else {
+                    mesh(new THREE.BoxGeometry(w + 0.4, 0.13, d + 0.4), darkMat, 0, (f + 1) * h - 0.08, 0, group);
+                }
+            }
+
+            if (basements > 0) {
+                const bottomY = -basements * h + 0.18;
+                if (isCylinder) {
+                    mesh(new THREE.CylinderGeometry(w/2 - 0.12, w/2 - 0.12, 0.18, 24), floorMat, 0, bottomY, 0, group);
+                } else {
+                    mesh(new THREE.BoxGeometry(w - 0.25, 0.18, d - 0.25), floorMat, 0, bottomY, 0, group);
+                }
+            }
+
+            const top = floors * h;
+            if (floors > 0) {
+                if (isCylinder) {
+                    mesh(new THREE.CylinderGeometry(w/2 + 0.5, w/2 + 0.5, 1, 24), trimMat, 0, top + 0.45, 0, group);
+                    for (let i = 0; i < 4; i++) {
+                        const angle = (i / 4) * Math.PI * 2;
+                        const rx = Math.cos(angle) * w * 0.25;
+                        const rz = Math.sin(angle) * w * 0.25;
+                        mesh(new THREE.CylinderGeometry(w * 0.08, w * 0.08, 1.15, 12), darkMat, rx, top + 1.52, rz, group);
+                    }
+                } else {
+                    mesh(new THREE.BoxGeometry(w + 1, 1, d + 1), trimMat, 0, top + 0.45, 0, group);
+                    for (let x = -w * 0.25; x <= w * 0.25; x += w * 0.25) {
+                        mesh(new THREE.BoxGeometry(w * 0.15, 1.15, d * 0.18), darkMat, x, top + 1.52, 0, group);
+                    }
+                }
+            }
+            return group;
+        }
+
+        // 生成主建築 (清空)
+        function generateMain() {
+            while (mainBuilding.children.length > 0) {
+                mainBuilding.remove(mainBuilding.children[0]);
+            }
+            mainBuilding.scale.set(1, 1, 1);
+            mainBuilding.userData.buildingId = 0;
+            mainBuilding.userData.isMain = true;
+            mainBuilding.userData.floors = 0;
+            mainBuilding.userData.basements = 0;
+            mainBuilding.userData.width = 14;
+            mainBuilding.userData.shape = 'box';
+
+            rebuildAnnotations();
+            updateXray();
+            controls.target.set(0, 0, 0);
+            controls.update();
+            $('analysisStatus').textContent = '無建築 — 點擊「生成／新增 建築」開始';
+            selectBuildings([]);
+            const scaleInput = $('scaleInput');
+            scaleInput.disabled = true;
+            scaleInput.value = 1;
+        }
+
+        // 新增建築 (獨立)
+        function addNewBuilding() {
+            const floors = Math.max(0, parseInt($('floors').value) || 5);
+            const basements = Math.max(0, parseInt($('basements').value) || 0);
+            const width = Math.max(5, parseFloat($('width').value) || 14);
+            const wallColor = $('wallColor').value;
+            const glassColor = $('glassColor').value;
+            const shape = $('buildingShape').value || 'box';
+
+            const group = createBuilding(floors, basements, width, wallColor, glassColor, false, shape);
+            const id = nextBuildingId++;
+            group.userData.buildingId = id;
+            group.userData.isAddition = true;
+            group.userData.floors = floors;
+            group.userData.basements = basements;
+            group.userData.width = width;
+            group.userData.shape = shape;
+            group.userData.prompt = `${floors} 樓 (${shape})`;
+
+            const angle = Math.random() * Math.PI * 2;
+            const dist = 10 + Math.random() * 20;
+            group.position.set(Math.cos(angle) * dist, 0, Math.sin(angle) * dist);
+            group.scale.set(1, 1, 1);
+            group.traverse(o => { if (o.isMesh) { o.castShadow = o.receiveShadow = true } });
+            additionsGroup.add(group);
+            updateXray();
+            additionPrompts.push(group.userData.prompt);
+            $('analysisStatus').textContent = `已新增建築：${floors} 層 (${shape})`;
+            selectBuildings([group]);
+            autoSave();
+        }
+
+        function showOnlyBasement() {
+            onlyBasement = !onlyBasement;
+            updateXray();
+            $('perspectiveBtn').textContent = `透視樓板：${xrayMode?'開':'關'}`;
+            $('analysisStatus').textContent = onlyBasement ? '只顯示地下室層 (地上樓層與地板隱藏)' : '顯示完整建築';
+            
+            [mainBuilding, additionsGroup].forEach(group => {
+                group.traverse(o => {
+                    if (!o.isMesh) return;
+                    const isFloor = o.material.name === 'floor' || o.userData.floor;
+                    const isBasement = o.userData.isBasement || false;
+                    
+                    if (onlyBasement) {
+                        if (!isBasement) {
+                            o.material.transparent = true;
+                            o.material.opacity = 0.0;
+                            o.material.depthWrite = false;
+                            o.material.needsUpdate = true;
+                        } else {
+                            o.material.transparent = false;
+                            o.material.opacity = 1;
+                            o.material.depthWrite = true;
+                            o.material.needsUpdate = true;
+                        }
+                    } else {
+                        if (isBasement) {
+                            o.material.transparent = true;
+                            o.material.opacity = 0.5;
+                            o.material.depthWrite = false;
+                            o.material.needsUpdate = true;
+                            return;
+                        }
+                        if (isFloor) {
+                            o.material.opacity = 1;
+                            o.material.transparent = false;
+                            o.material.depthWrite = true;
+                            o.material.needsUpdate = true;
+                            return;
+                        }
+                        o.material.transparent = xrayMode;
+                        o.material.opacity = xrayMode ? 0.22 : 1;
+                        o.material.depthWrite = !xrayMode;
+                        o.material.needsUpdate = true;
+                    }
+                });
+            });
+            autoSave();
+        }
+
+        function regenerateAllBuildings() {
+            const buildingsData = [];
+            
+            if (mainBuilding.children.length > 0 && mainBuilding.userData.floors > 0) {
+                buildingsData.push({
+                    isMain: true,
+                    floors: mainBuilding.userData.floors || 5,
+                    basements: mainBuilding.userData.basements || 0,
+                    width: mainBuilding.userData.width || 14,
+                    wallColor: $('wallColor').value,
+                    glassColor: $('glassColor').value,
+                    position: mainBuilding.position.clone(),
+                    scale: mainBuilding.scale.clone(),
+                    shape: mainBuilding.userData.shape || 'box'
+                });
+            }
+            
+            additionsGroup.children.forEach(g => {
+                if (g.userData.isAddition) {
+                    buildingsData.push({
+                        isMain: false,
+                        floors: g.userData.floors || 3,
+                        basements: g.userData.basements || 0,
+                        width: g.userData.width || 14,
+                        wallColor: $('wallColor').value,
+                        glassColor: $('glassColor').value,
+                        position: g.position.clone(),
+                        scale: g.scale.clone(),
+                        prompt: g.userData.prompt || '建築',
+                        shape: g.userData.shape || 'box'
+                    });
+                }
+            });
+
+            while (mainBuilding.children.length > 0) {
+                mainBuilding.remove(mainBuilding.children[0]);
+            }
+            while (additionsGroup.children.length > 0) {
+                additionsGroup.remove(additionsGroup.children[0]);
+            }
+
+            if (buildingsData.length === 0) {
+                rebuildAnnotations();
+                updateXray();
+                selectBuildings([]);
+                $('analysisStatus').textContent = '無建築';
+                autoSave();
+                return;
+            }
+
+            buildingsData.forEach(data => {
+                const group = createBuilding(
+                    data.floors, 
+                    data.basements, 
+                    data.width, 
+                    data.wallColor, 
+                    data.glassColor, 
+                    data.isMain,
+                    data.shape || 'box'
+                );
+                
+                if (data.isMain) {
+                    group.userData.buildingId = 0;
+                    group.userData.isMain = true;
+                    group.userData.floors = data.floors;
+                    group.userData.basements = data.basements;
+                    group.userData.width = data.width;
+                    group.userData.shape = data.shape || 'box';
+                    
+                    while (group.children.length > 0) {
+                        const child = group.children[0];
+                        group.remove(child);
+                        mainBuilding.add(child);
+                    }
+                    mainBuilding.position.copy(data.position);
+                    mainBuilding.scale.copy(data.scale);
+                } else {
+                    const id = nextBuildingId++;
+                    group.userData.buildingId = id;
+                    group.userData.isAddition = true;
+                    group.userData.floors = data.floors;
+                    group.userData.basements = data.basements;
+                    group.userData.width = data.width;
+                    group.userData.shape = data.shape || 'box';
+                    group.userData.prompt = data.prompt || `${data.floors} 樓`;
+                    group.position.copy(data.position);
+                    group.scale.copy(data.scale);
+                    group.traverse(o => { if (o.isMesh) { o.castShadow = o.receiveShadow = true } });
+                    additionsGroup.add(group);
+                    additionPrompts.push(group.userData.prompt);
+                }
+            });
+
+            rebuildAnnotations();
+            updateXray();
+            selectBuildings([]);
+            $('analysisStatus').textContent = `已重新生成 ${buildingsData.length} 棟建築`;
+            autoSave();
+        }
+
+        function addBuilding(prompt, remember = true, placement = null, shape = null) {
+            const lower = prompt.toLowerCase(),
+                floorMatch = prompt.match(/(\d+)\s*樓/),
+                floors = Math.min(20, Math.max(1, +(floorMatch?.[1] || 3))),
+                shapeType = shape || (/圓|水塔|tower/.test(lower) ? 'cylinder' : 'box');
+            let w = (/倉庫|warehouse|hall/.test(lower)) ? 18 : (shapeType === 'cylinder' ? 8 : 11);
+            let d = (/倉庫|warehouse|hall/.test(lower)) ? 13 : (shapeType === 'cylinder' ? 8 : 9);
+            const h = floors * 3,
+                basementCount = placement?.basements || 0;
+            const x = placement?.x ?? (/左|left/.test(lower) ? -26 : /右|right/.test(lower) ? 26 : 0),
+                z = placement?.z ?? (/前|front/.test(lower) ? 18 : /後|back/.test(lower) ? -18 : 20);
+            if (placement) { w = placement.w;
+                d = placement.d }
+            
+            const wallColor = $('wallColor').value;
+            const glassColor = $('glassColor').value;
+            const group = createBuilding(floors, basementCount, w, wallColor, glassColor, false, shapeType, d);
+            
+            const id = nextBuildingId++;
+            group.userData.buildingId = id;
+            group.userData.isAddition = true;
+            group.userData.prompt = prompt;
+            group.userData.floors = floors;
+            group.userData.basements = basementCount;
+            group.userData.width = w;
+            group.userData.depth = d;
+            group.userData.shape = shapeType;
+
+            group.position.set(x, 0, z);
+            group.scale.set(1, 1, 1);
+            group.traverse(o => { if (o.isMesh) { o.castShadow = o.receiveShadow = true } });
+            additionsGroup.add(group);
+            updateXray();
+            if (remember) additionPrompts.push(prompt);
+            $('analysisStatus').textContent = `已新增：${prompt} (${shapeType})`;
+            selectBuildings([group]);
+            autoSave();
+        }
+
+        function findBuildingById(id) {
+            if (id === 0) return mainBuilding;
+            if (id === -1) return groundGroup;
+            for (let child of additionsGroup.children) {
+                if (child.userData.buildingId === id) return child;
+            }
+            return null;
+        }
+
+        // === MARKER LONG-PRESS TO MOVE ===
+        const MARKER_LONG_PRESS_MS = 480;
+        const MARKER_MOVE_THRESHOLD = 6;
+
+        function attachAnnotationInteraction(el, index) {
+            el.addEventListener('pointerdown', (e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                if (multiLinkMode || relationMode) {
+                    handleAnnotationClick(index, e);
+                    return;
+                }
+                const startX = e.clientX,
+                    startY = e.clientY;
+                let dragStarted = false,
+                    cancelled = false;
+
+                const timer = setTimeout(() => {
+                    dragStarted = true;
+                    beginMarkerDrag(index, startX, startY);
+                }, MARKER_LONG_PRESS_MS);
+
+                function onMove(ev) {
+                    if (dragStarted) { updateMarkerDrag(index, ev); return; }
+                    const dx = ev.clientX - startX,
+                        dy = ev.clientY - startY;
+                    if (Math.hypot(dx, dy) > MARKER_MOVE_THRESHOLD) {
+                        cancelled = true;
+                        clearTimeout(timer);
+                    }
+                }
+                function onUp(ev) {
+                    clearTimeout(timer);
+                    window.removeEventListener('pointermove', onMove);
+                    window.removeEventListener('pointerup', onUp);
+                    if (dragStarted) {
+                        finishMarkerDrag(index);
+                    } else if (!cancelled) {
+                        handleAnnotationClick(index, e);
+                    }
+                }
+                window.addEventListener('pointermove', onMove);
+                window.addEventListener('pointerup', onUp);
+            });
+        }
+
+        function beginMarkerDrag(index, startScreenX, startScreenY) {
+            markerDragIndex = index;
+            controls.enabled = false;
+            markerDragStartScreen = { x: startScreenX, y: startScreenY };
+            markerDragStartWorldPos = annotations[index] ? [...annotations[index].position] : null;
+            markerDragAxisMode = null;
+            const el = annotationObjects[index]?.element;
+            if (el) el.classList.add('dragging');
+            $('mode').textContent = '拖曳標註點以移動 (自動判別 X/Z 或 Y 軸)，放開以放置';
+            $('mode').classList.add('show');
+            $('analysisStatus').textContent = '拖曳標註點中…';
+        }
+
+        const AXIS_LOCK_PIXELS = 10; // 拖曳超過此像素距離後鎖定判別出的軸向，避免抖動反覆切換
+
+        function updateMarkerDrag(index, ev) {
+            const data = annotations[index];
+            const obj = annotationObjects[index];
+            if (!data || !obj || !markerDragStartScreen || !markerDragStartWorldPos) return;
+
+            const dx = ev.clientX - markerDragStartScreen.x;
+            const dy = ev.clientY - markerDragStartScreen.y;
+
+            // 自動判別移動軸向：拖曳距離夠大之前不判定，之後依水平/垂直分量比例鎖定，
+            // 讓使用者純粹用滑鼠拖曳即可自動決定要調整 X/Z (水平面) 還是 Y (高度)，無需另外開啟面板操作。
+            if (!markerDragAxisMode && Math.hypot(dx, dy) > AXIS_LOCK_PIXELS) {
+                markerDragAxisMode = Math.abs(dy) > Math.abs(dx) * 1.15 ? 'vertical' : 'horizontal';
+            }
+
+            if (markerDragAxisMode === 'vertical') {
+                // 垂直拖曳 → 自動判別為 Y 軸 (高度) 調整，X/Z 維持拖曳起點座標
+                const dist = camera.position.distanceTo(new THREE.Vector3(...markerDragStartWorldPos));
+                const worldPerPixel = Math.max(0.01, dist * 0.0016);
+                const newY = markerDragStartWorldPos[1] - dy * worldPerPixel;
+                data.position = [markerDragStartWorldPos[0], newY, markerDragStartWorldPos[2]];
+                data.floor = null; // 已脫離原樓層平面，改為自由高度
+                obj.position.copy(obj.parent.worldToLocal(new THREE.Vector3(...data.position)));
+                $('analysisStatus').textContent = `自動判別：垂直移動中 (Y = ${newY.toFixed(2)})`;
+                return;
+            }
+
+            $('analysisStatus').textContent = '自動判別：水平面移動中 (X / Z)';
+
+            // 若此標註是透過「標註樓層」選擇建立的，移動時仍鎖定在該樓層平面上。
+            // 改為以「攝影機水平右方向 / 前方向」將滑鼠拖曳的螢幕位移，直接映射成該樓層平面上的
+            // 世界座標相對位移 (而非用滑鼠射線與樓層平面求交的絕對定位)。
+            // 絕對定位在非俯視角度下，射線與平面求交常會落在離螢幕游標很遠的座標，
+            // 導致每次拖曳都被夾回樓層外框邊緣；改為相對移動後，任何視角都能穩定、直覺地移動到目的地，
+            // 且變換視角後再次拖曳會從目前位置繼續移動，不會重置。
+            if (data.floor) {
+                const building = findBuildingById(data.buildingId) || mainBuilding;
+                const localY = getFloorLocalY(data.floor, building);
+                if (localY === null) return;
+
+                const dist = camera.position.distanceTo(new THREE.Vector3(...markerDragStartWorldPos));
+                const worldPerPixel = Math.max(0.01, dist * 0.0016);
+
+                const camRight = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
+                camRight.y = 0;
+                if (camRight.lengthSq() < 1e-6) camRight.set(1, 0, 0); else camRight.normalize();
+
+                const camForward = new THREE.Vector3();
+                camera.getWorldDirection(camForward);
+                camForward.y = 0;
+                if (camForward.lengthSq() < 1e-6) camForward.set(0, 0, -1); else camForward.normalize();
+
+                const rawPoint = new THREE.Vector3(...markerDragStartWorldPos)
+                    .addScaledVector(camRight, dx * worldPerPixel)
+                    .addScaledVector(camForward, -dy * worldPerPixel);
+
+                const point = clampPointToFloorBounds(building, rawPoint, localY);
+                data.position = point.toArray();
+                obj.position.copy(building.worldToLocal(point.clone()));
+                return;
+            }
+
+            const r = renderer.domElement.getBoundingClientRect();
+            pointer.x = ((ev.clientX - r.left) / r.width) * 2 - 1;
+            pointer.y = -((ev.clientY - r.top) / r.height) * 2 + 1;
+            raycaster.setFromCamera(pointer, camera);
+
+            const targets = [ground];
+            mainBuilding.traverse(o => { if (o.isMesh) targets.push(o); });
+            additionsGroup.traverse(o => { if (o.isMesh) targets.push(o); });
+
+            const hit = raycaster.intersectObjects(targets, false)[0];
+            if (!hit) return;
+
+            const newParent = getBuildingGroupFromHit(hit);
+            data.position = hit.point.toArray();
+            data.buildingId = newParent.userData.buildingId !== undefined ? newParent.userData.buildingId : 0;
+
+            if (obj.parent !== newParent) {
+                if (obj.parent) obj.parent.remove(obj);
+                newParent.add(obj);
+            }
+            const localPos = newParent.worldToLocal(hit.point.clone());
+            obj.position.copy(localPos);
+        }
+
+        function finishMarkerDrag(index) {
+            markerDragIndex = -1;
+            markerDragStartScreen = null;
+            markerDragStartWorldPos = null;
+            markerDragAxisMode = null;
+            controls.enabled = true;
+            const el = annotationObjects[index]?.element;
+            if (el) el.classList.remove('dragging');
+            rebuildRelations();
+            $('mode').classList.remove('show');
+            $('analysisStatus').textContent = '已更新標註位置。';
+            autoSave();
+            updateAxisMovePanel();
+        }
+
+        // === 標註點 X/Y/Z 軸精確移動 (不需選擇樓層) ===
+        function updateAxisMovePanel() {
+            const panel = $('axisMovePanel');
+            if (!panel) return;
+            const data = annotations[selectedAnnotationIndex];
+            if (selectedAnnotationIndex < 0 || !data) {
+                panel.style.display = 'none';
+                return;
+            }
+            panel.style.display = '';
+            $('axisMoveX').value = data.position[0].toFixed(2);
+            $('axisMoveY').value = data.position[1].toFixed(2);
+            $('axisMoveZ').value = data.position[2].toFixed(2);
+        }
+
+        function setAnnotationPosition(index, newPos) {
+            const data = annotations[index];
+            const obj = annotationObjects[index];
+            if (!data || !obj) return;
+            data.position = newPos;
+            const worldPos = new THREE.Vector3(newPos[0], newPos[1], newPos[2]);
+            const parentGroup = obj.parent || findBuildingById(data.buildingId) || mainBuilding;
+            const localPos = parentGroup.worldToLocal(worldPos.clone());
+            obj.position.copy(localPos);
+            rebuildRelations();
+            updateAxisMovePanel();
+            autoSave();
+        }
+
+        function nudgeSelectedAnnotation(axis, dir) {
+            if (selectedAnnotationIndex < 0 || !annotations[selectedAnnotationIndex]) return;
+            const step = parseFloat($('axisMoveStep').value) || 0.5;
+            const data = annotations[selectedAnnotationIndex];
+            const pos = [...data.position];
+            pos[axis] = (pos[axis] || 0) + dir * step;
+            if (axis === 1) data.floor = null;
+            setAnnotationPosition(selectedAnnotationIndex, pos);
+            $('analysisStatus').textContent = `已沿 ${['X', 'Y', 'Z'][axis]} 軸移動標註點`;
+        }
+
+        function setSelectedAnnotationAxis(axis, value) {
+            if (selectedAnnotationIndex < 0 || !annotations[selectedAnnotationIndex]) return;
+            const v = parseFloat(value);
+            if (isNaN(v)) return;
+            const data = annotations[selectedAnnotationIndex];
+            const pos = [...data.position];
+            pos[axis] = v;
+            if (axis === 1) data.floor = null;
+            setAnnotationPosition(selectedAnnotationIndex, pos);
+        }
+
+        // === 選取/搜尋標註點的連結鏈高亮 ===
+        function findChainStart(index) {
+            let current = index;
+            const visited = new Set();
+            while (!visited.has(current)) {
+                visited.add(current);
+                const incoming = relations.find(r => r.to === current);
+                if (!incoming) break;
+                current = incoming.from;
+            }
+            return current;
+        }
+
+        function setRelationColor(group, hexColor) {
+            if (group.userData.shaft) group.userData.shaft.material.color.setHex(hexColor);
+            if (group.userData.head) group.userData.head.material.color.setHex(hexColor);
+        }
+
+        function clearChainHighlight() {
+            annotationObjects.forEach(obj => {
+                if (obj.element) obj.element.classList.remove('chain-blink', 'chain-start');
+            });
+            relationGroup.children.forEach(g => {
+                if (g.userData.chainBlink) {
+                    g.userData.chainBlink = false;
+                    const isSelected = g.userData.relationId != null && selectedRelationIds.includes(g.userData
+                        .relationId);
+                    setRelationColor(g, isSelected ? 0xff2d55 : g.userData.origColorHex);
+                }
+            });
+            highlightedChain = { prevIndex: -1, nextIndex: -1, prevRelationId: null, nextRelationId: null, startIndex: -1 };
+        }
+
+        function updateChainHighlight(index) {
+            clearChainHighlight();
+            if (index < 0 || !annotations[index]) return;
+
+            const incomingRel = relations.find(r => r.to === index);
+            const outgoingRel = relations.find(r => r.from === index);
+            const prevIndex = incomingRel ? incomingRel.from : -1;
+            const nextIndex = outgoingRel ? outgoingRel.to : -1;
+            const startIndex = findChainStart(index);
+
+            highlightedChain = {
+                prevIndex,
+                nextIndex,
+                prevRelationId: incomingRel ? incomingRel.id : null,
+                nextRelationId: outgoingRel ? outgoingRel.id : null,
+                startIndex
+            };
+
+            if (prevIndex >= 0 && annotationObjects[prevIndex]?.element) {
+                annotationObjects[prevIndex].element.classList.add('chain-blink');
+            }
+            if (nextIndex >= 0 && annotationObjects[nextIndex]?.element) {
+                annotationObjects[nextIndex].element.classList.add('chain-blink');
+            }
+            if (startIndex >= 0 && annotationObjects[startIndex]?.element) {
+                annotationObjects[startIndex].element.classList.add('chain-start');
+            }
+
+            relationGroup.children.forEach(g => {
+                if (g.userData.relationId === highlightedChain.prevRelationId ||
+                    g.userData.relationId === highlightedChain.nextRelationId) {
+                    g.userData.chainBlink = true;
+                }
+            });
+        }
+
+        function updateRelationBlink() {
+            const hasBlink = relationGroup.children.some(g => g.userData.chainBlink);
+            if (!hasBlink) return;
+            const t = Date.now() * 0.005;
+            const mix = 0.35 + ((Math.sin(t) + 1) / 2) * 0.65;
+            relationGroup.children.forEach(g => {
+                if (!g.userData.chainBlink) return;
+                const base = new THREE.Color(g.userData.origColorHex);
+                const blink = new THREE.Color(0xff2d55);
+                base.lerp(blink, mix);
+                setRelationColor(g, base.getHex());
+            });
+        }
+
+        function updateRelationVisualScale() {
+            relationGroup.children.forEach(g => {
+                if (!g.userData.isRelationVisual) return;
+                const dist = camera.position.distanceTo(g.userData.midpoint || g.position);
+                const scaleFactor = THREE.MathUtils.clamp(dist / LINE_REFERENCE_DISTANCE, 0.35, 3.5);
+                g.scale.set(scaleFactor, 1, scaleFactor);
+            });
+        }
+
+        function rebuildAnnotations() {
+            clearChainHighlight();
+            annotationObjects.forEach(obj => {
+                if (obj.parent) obj.parent.remove(obj);
+            });
+            annotationObjects = [];
+
+            annotations.forEach((data, index) => {
+                const el = document.createElement('div');
+                el.className = 'annotation';
+                el.textContent = data.text;
+                el.style.pointerEvents = 'auto';
+                el.style.setProperty('--symbol', `"${data.icon || '●'}"`);
+                el.style.setProperty('--accent', data.color || '#5f8aff');
+                el.dataset.index = index;
+
+                const orders = relations.filter(r => r.from === index || r.to === index).map(r => r.order);
+                if (orders.length > 0) {
+                    const badge = document.createElement('span');
+                    badge.className = 'order-badge';
+                    badge.textContent = orders.sort((a, b) => a - b).join(',');
+                    el.appendChild(badge);
+                }
+
+                if (selectedForLink.includes(index)) {
+                    el.classList.add('selected');
+                } else if (index === selectedAnnotationIndex) {
+                    el.classList.add('selected');
+                }
+
+                const obj = new CSS2DObject(el);
+                const parentGroup = findBuildingById(data.buildingId);
+                if (parentGroup) {
+                    const worldPos = new THREE.Vector3(data.position[0], data.position[1], data.position[2]);
+                    const localPos = parentGroup.worldToLocal(worldPos.clone());
+                    obj.position.copy(localPos);
+                    parentGroup.add(obj);
+                } else {
+                    const worldPos = new THREE.Vector3(data.position[0], data.position[1], data.position[2]);
+                    const localPos = mainBuilding.worldToLocal(worldPos.clone());
+                    obj.position.copy(localPos);
+                    mainBuilding.add(obj);
+                }
+                annotationObjects.push(obj);
+
+                attachAnnotationInteraction(el, index);
+            });
+
+            rebuildRelations();
+            updateAnnotationBadges();
+            updateMultiLinkUI();
+            updateAnnotationFloorOptions();
+        }
+
+        function handleAnnotationClick(index, event) {
+            if (multiLinkMode) {
+                toggleAnnotationSelection(index);
+                return;
+            }
+            if (annotationMode) return;
+            if (relationMode) {
+                if (annotations[index]) {
+                    linkAnnotation(annotations[index]);
+                }
+                return;
+            }
+            selectAnnotation(index);
+        }
+
+        function rebuildRelations() {
+            relationGroup.clear();
+            relationObjects = [];
+            const color = new THREE.Color($('lineColor').value || '#ff8b36');
+            const width = parseFloat($('lineWidth').value || '3');
+            relations.forEach((r) => {
+                if (annotations[r.from] && annotations[r.to]) {
+                    const obj = drawRelation(annotations[r.from], annotations[r.to], r.order, color, width, r);
+                    if (obj) relationObjects.push(obj);
+                }
+            });
+            $('deleteAllRelationsBtn').disabled = relations.length === 0;
+            $('deleteSelectedRelationsBtn').disabled = selectedRelationIds.length === 0;
+            updateAnnotationBadges();
+        }
+
+        function updateAnnotationBadges() {
+            annotationObjects.forEach((obj, idx) => {
+                const el = obj.element;
+                const existing = el.querySelector('.order-badge');
+                if (existing) existing.remove();
+                const orders = relations.filter(r => r.from === idx || r.to === idx).map(r => r.order);
+                if (orders.length > 0) {
+                    const badge = document.createElement('span');
+                    badge.className = 'order-badge';
+                    badge.textContent = orders.sort((a, b) => a - b).join(',');
+                    el.appendChild(badge);
+                }
+            });
+            updateAnnotationSearchList();
+        }
+
+        // === 標註點搜尋 ===
+        function updateAnnotationSearchList() {
+            const list = $('annotationSearchList');
+            if (!list) return;
+            list.innerHTML = '';
+            annotations.forEach(a => {
+                if (!a.text) return;
+                const opt = document.createElement('option');
+                opt.value = a.text;
+                list.appendChild(opt);
+            });
+        }
+
+        function jumpToAnnotation(index) {
+            const data = annotations[index];
+            if (!data) return;
+            clearModes();
+            selectAnnotation(index);
+            const worldPos = new THREE.Vector3(data.position[0], data.position[1], data.position[2]);
+            controls.target.copy(worldPos);
+            controls.update();
+            $('analysisStatus').textContent = `已跳至標註點：${data.text}`;
+        }
+
+        function searchAnnotation(query) {
+            const q = (query || '').trim().toLowerCase();
+            if (!q) { $('analysisStatus').textContent = '請輸入要搜尋的標註文字'; return; }
+            let idx = annotations.findIndex(a => (a.text || '').toLowerCase() === q);
+            if (idx < 0) idx = annotations.findIndex(a => (a.text || '').toLowerCase().includes(q));
+            if (idx < 0) {
+                $('analysisStatus').textContent = `找不到符合「${query}」的標註點`;
+                return;
+            }
+            jumpToAnnotation(idx);
+        }
+
+        // 以實體圓柱 (桿身) + 圓錐 (箭頭) 取代 THREE.ArrowHelper，
+        // 讓「連線粗細」實際套用在線段本身，而不是只放大箭頭。
+        function drawRelation(a, b, order, color, width, relationRef) {
+            const start = new THREE.Vector3(...a.position),
+                end = new THREE.Vector3(...b.position),
+                dir = end.clone().sub(start),
+                length = dir.length();
+            if (!length) return null;
+            dir.normalize();
+
+            const group = new THREE.Group();
+            group.position.copy(start);
+            group.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+
+            const headLength = Math.min(length * 0.35, 0.45 + width * 0.16);
+            const headRadius = Math.max(0.07, width * 0.12);
+            const shaftLength = Math.max(0.001, length - headLength);
+            const shaftRadius = Math.max(0.025, width * 0.05);
+            const colorHex = color.getHex();
+
+            const shaft = new THREE.Mesh(
+                new THREE.CylinderGeometry(shaftRadius, shaftRadius, shaftLength, 8),
+                new THREE.MeshBasicMaterial({ color: colorHex })
+            );
+            shaft.position.y = shaftLength / 2;
+            group.add(shaft);
+
+            const head = new THREE.Mesh(
+                new THREE.ConeGeometry(headRadius, headLength, 10),
+                new THREE.MeshBasicMaterial({ color: colorHex })
+            );
+            head.position.y = shaftLength + headLength / 2;
+            group.add(head);
+
+            group.userData.relationId = relationRef ? relationRef.id : null;
+            group.userData.origColorHex = colorHex;
+            group.userData.shaft = shaft;
+            group.userData.head = head;
+            group.userData.isRelationVisual = true;
+            group.userData.midpoint = start.clone().add(dir.clone().multiplyScalar(length / 2));
+
+            if (relationRef && selectedRelationIds.includes(relationRef.id)) {
+                setRelationColor(group, 0xff2d55);
+            }
+            relationGroup.add(group);
+            return group;
+        }
+
+        function clearRelationSelection() {
+            selectedRelationIds = [];
+            relationGroup.children.forEach(g => {
+                if (g.userData.origColorHex !== undefined) setRelationColor(g, g.userData.origColorHex);
+            });
+            $('deleteSelectedRelationsBtn').disabled = true;
+        }
+
+        function toggleRelationSelection(id, group) {
+            const idx = selectedRelationIds.indexOf(id);
+            if (idx >= 0) {
+                selectedRelationIds.splice(idx, 1);
+                setRelationColor(group, group.userData.origColorHex);
+            } else {
+                selectedRelationIds.push(id);
+                setRelationColor(group, 0xff2d55);
+            }
+            $('deleteSelectedRelationsBtn').disabled = selectedRelationIds.length === 0;
+            $('analysisStatus').textContent = selectedRelationIds.length > 0 ?
+                `已選取 ${selectedRelationIds.length} 條連線` : '尚未選取連線';
+        }
+
+        function deleteSelectedRelations() {
+            if (selectedRelationIds.length === 0) return;
+            if (!confirm(`確定要刪除選取的 ${selectedRelationIds.length} 條連線嗎？`)) return;
+            relations = relations.filter(r => !selectedRelationIds.includes(r.id));
+            selectedRelationIds = [];
+            rebuildRelations();
+            $('deleteSelectedRelationsBtn').disabled = true;
+            $('analysisStatus').textContent = '已刪除選取的連線。';
+            autoSave();
+        }
+
+        function selectAnnotation(index) {
+            if (selectedAnnotationIndex >= 0 && annotationObjects[selectedAnnotationIndex]) {
+                annotationObjects[selectedAnnotationIndex].element.classList.remove('selected');
+            }
+            if (index === selectedAnnotationIndex) {
+                selectedAnnotationIndex = -1;
+                $('deleteSelectedAnnotationBtn').disabled = true;
+                $('editAnnotationBtn').disabled = true;
+                clearChainHighlight();
+                updateAxisMovePanel();
+                return;
+            }
+            selectedAnnotationIndex = index;
+            if (annotationObjects[index]) {
+                annotationObjects[index].element.classList.add('selected');
+                $('deleteSelectedAnnotationBtn').disabled = false;
+                $('editAnnotationBtn').disabled = false;
+                $('analysisStatus').textContent = `已選取標註：${annotations[index].text}`;
+            }
+            updateChainHighlight(index);
+            updateAxisMovePanel();
+        }
+
+        function toggleAnnotationSelection(index) {
+            const el = annotationObjects[index]?.element;
+            if (!el) return;
+            if (selectedForLink.includes(index)) {
+                selectedForLink = selectedForLink.filter(i => i !== index);
+                el.classList.remove('selected');
+            } else {
+                selectedForLink.push(index);
+                el.classList.add('selected');
+            }
+            updateMultiLinkUI();
+        }
+
+        function updateMultiLinkUI() {
+            $('confirmMultiLinkBtn').disabled = selectedForLink.length < 2;
+            $('clearLinkSelectionBtn').disabled = selectedForLink.length === 0;
+            $('deleteSelectedAnnotationsBtn').disabled = selectedForLink.length === 0;
+            const names = selectedForLink.map(i => annotations[i]?.text || '?').join(' → ');
+            $('multiLinkStatus').textContent = selectedForLink.length >= 2 ? `已選取 ${selectedForLink.length} 個：${names}` :
+                `已選取 ${selectedForLink.length} 個標註點`;
+        }
+
+        function deleteSelectedAnnotations() {
+            if (selectedForLink.length === 0) return;
+            const count = selectedForLink.length;
+            const names = selectedForLink.map(i => annotations[i]?.text || '未命名').join('、');
+            if (!confirm(`確定要刪除選取的 ${count} 個標註嗎？\n${names}\n(相關連線也會一併移除)`)) return;
+
+            const sorted = [...selectedForLink].sort((a, b) => b - a);
+            sorted.forEach(idx => {
+                deleteAnnotation(idx);
+            });
+            
+            selectedForLink = [];
+            updateMultiLinkUI();
+            $('analysisStatus').textContent = `已刪除 ${count} 個標註及相關連線。`;
+            autoSave();
+        }
+
+        function deleteAnnotation(index) {
+            if (index < 0 || index >= annotations.length) return;
+
+            if (annotationObjects[index] && annotationObjects[index].parent) {
+                annotationObjects[index].parent.remove(annotationObjects[index]);
+            }
+            annotationObjects.splice(index, 1);
+
+            const toRemove = [];
+            relations.forEach((r, idx) => {
+                if (r.from === index || r.to === index) {
+                    toRemove.push(idx);
+                }
+            });
+            toRemove.sort((a, b) => b - a).forEach(idx => relations.splice(idx, 1));
+
+            relations = relations.map(r => ({
+                id: r.id,
+                from: r.from > index ? r.from - 1 : r.from,
+                to: r.to > index ? r.to - 1 : r.to,
+                order: r.order
+            }));
+
+            if (selectedAnnotationIndex === index) {
+                selectedAnnotationIndex = -1;
+                $('deleteSelectedAnnotationBtn').disabled = true;
+                $('editAnnotationBtn').disabled = true;
+            } else if (selectedAnnotationIndex > index) {
+                selectedAnnotationIndex--;
+            }
+
+            selectedForLink = selectedForLink.filter(i => i !== index).map(i => i > index ? i - 1 : i);
+            updateMultiLinkUI();
+
+            annotations.splice(index, 1);
+
+            selectedRelationIds = selectedRelationIds.filter(id => relations.some(r => r.id === id));
+            rebuildAnnotations();
+            $('deleteAllRelationsBtn').disabled = relations.length === 0;
+            $('deleteSelectedRelationsBtn').disabled = selectedRelationIds.length === 0;
+            $('analysisStatus').textContent = `已刪除標註及相關連線`;
+        }
+
+        function linkAnnotation(record) {
+            if (!relationStart) {
+                relationStart = record;
+                $('mode').textContent = '請再點選另一個標註點';
+                $('mode').classList.add('show');
+                return;
+            }
+            if (relationStart === record) return;
+            const a = relationStart,
+                b = record,
+                order = relations.length + 1;
+            const color = new THREE.Color($('lineColor').value || '#ff8b36');
+            const width = parseFloat($('lineWidth').value || '3');
+            const relationRecord = { id: nextRelationId++, from: annotations.indexOf(a), to: annotations.indexOf(
+                b), order };
+            const obj = drawRelation(a, b, order, color, width, relationRecord);
+            if (obj) {
+                relations.push(relationRecord);
+                $('analysisStatus').textContent = `已建立關係：${a.text} → ${b.text}`;
+                $('deleteAllRelationsBtn').disabled = false;
+                updateAnnotationBadges();
+            }
+            relationStart = null;
+            clearModes();
+            $('mode').textContent = '關係已建立';
+            $('mode').classList.add('show');
+            setTimeout(() => $('mode').classList.remove('show'), 1500);
+            autoSave();
+        }
+
+        function confirmMultiLink() {
+            if (selectedForLink.length < 2) { alert('請至少選取兩個標註點。'); return; }
+            let created = 0;
+            const color = new THREE.Color($('lineColor').value || '#ff8b36');
+            const width = parseFloat($('lineWidth').value || '3');
+            for (let i = 0; i < selectedForLink.length - 1; i++) {
+                const fromIdx = selectedForLink[i],
+                    toIdx = selectedForLink[i + 1];
+                if (fromIdx >= 0 && toIdx >= 0 && fromIdx < annotations.length && toIdx < annotations.length) {
+                    const a = annotations[fromIdx],
+                        b = annotations[toIdx],
+                        order = relations.length + 1;
+                    const relationRecord = { id: nextRelationId++, from: fromIdx, to: toIdx, order };
+                    const obj = drawRelation(a, b, order, color, width, relationRecord);
+                    if (obj) { relations.push(relationRecord);
+                        created++; }
+                }
+            }
+            if (created > 0) {
+                $('analysisStatus').textContent = `已建立 ${created} 條關係連線。`;
+                $('deleteAllRelationsBtn').disabled = false;
+                updateAnnotationBadges();
+                selectedForLink.forEach(i => { if (annotationObjects[i]) annotationObjects[i].element.classList.remove(
+                        'selected'); });
+                selectedForLink = [];
+                updateMultiLinkUI();
+                $('confirmMultiLinkBtn').disabled = true;
+                $('clearLinkSelectionBtn').disabled = true;
+            } else { alert('無法建立關係，請確認標註點有效。'); }
+            autoSave();
+        }
+
+        function clearLinkSelection() {
+            selectedForLink.forEach(i => { if (annotationObjects[i]) annotationObjects[i].element.classList.remove('selected'); });
+            selectedForLink = [];
+            updateMultiLinkUI();
+            $('confirmMultiLinkBtn').disabled = true;
+            $('clearLinkSelectionBtn').disabled = true;
+            $('deleteSelectedAnnotationsBtn').disabled = true;
+        }
+
+        function deleteSelectedAnnotation() {
+            if (selectedAnnotationIndex < 0) return;
+            const text = annotations[selectedAnnotationIndex]?.text || '未命名';
+            if (confirm(`確定要刪除標註「${text}」及其所有關聯連線嗎？`)) deleteAnnotation(selectedAnnotationIndex);
+            autoSave();
+        }
+
+        function deleteAllRelations() {
+            if (relations.length === 0) { alert('沒有關係連線可刪除。'); return; }
+            if (confirm(`確定要刪除所有 ${relations.length} 條關係連線嗎？`)) {
+                relations = [];
+                selectedRelationIds = [];
+                $('deleteSelectedRelationsBtn').disabled = true;
+                rebuildRelations();
+                $('analysisStatus').textContent = '已刪除所有關係連線。';
+                $('deleteAllRelationsBtn').disabled = true;
+                updateAnnotationBadges();
+                if (selectedAnnotationIndex >= 0 && selectedAnnotationIndex < annotations.length) {
+                    $('deleteSelectedAnnotationBtn').disabled = false;
+                    $('editAnnotationBtn').disabled = false;
+                } else {
+                    $('deleteSelectedAnnotationBtn').disabled = true;
+                    $('editAnnotationBtn').disabled = true;
+                }
+            }
+            autoSave();
+        }
+
+        function editSelectedAnnotation() {
+            if (selectedAnnotationIndex < 0 || selectedAnnotationIndex >= annotations.length) return;
+            const data = annotations[selectedAnnotationIndex];
+            const newText = prompt('編輯標註文字', data.text);
+            if (newText !== null && newText.trim() !== '') {
+                data.text = newText.trim();
+                const el = annotationObjects[selectedAnnotationIndex]?.element;
+                if (el) {
+                    el.textContent = newText.trim();
+                    const orders = relations.filter(r => r.from === selectedAnnotationIndex || r.to ===
+                        selectedAnnotationIndex).map(r => r.order);
+                    if (orders.length > 0) {
+                        const badge = document.createElement('span');
+                        badge.className = 'order-badge';
+                        badge.textContent = orders.sort((a, b) => a - b).join(',');
+                        el.appendChild(badge);
+                    }
+                }
+                $('analysisStatus').textContent = `標註已更新為：「${newText.trim()}」`;
+            }
+            autoSave();
+        }
+
+        function updateXray() {
+            const basements = parseInt($('basements').value) || 0;
+            ground.material.transparent = xrayMode || basements > 0 || onlyBasement;
+            ground.material.opacity = (xrayMode || basements > 0 || onlyBasement) ? 0.35 : 1;
+            ground.material.needsUpdate = true;
+
+            [mainBuilding, additionsGroup].forEach(group => {
+                group.traverse(o => {
+                    if (!o.isMesh) return;
+                    const isFloor = o.material.name === 'floor' || o.userData.floor;
+                    const isBasement = o.userData.isBasement || false;
+                    
+                    if (onlyBasement) {
+                        if (!isBasement) {
+                            o.material.transparent = true;
+                            o.material.opacity = 0.0;
+                            o.material.depthWrite = false;
+                            o.material.needsUpdate = true;
+                        } else {
+                            o.material.transparent = false;
+                            o.material.opacity = 1;
+                            o.material.depthWrite = true;
+                            o.material.needsUpdate = true;
+                        }
+                        return;
+                    }
+                    
+                    if (isBasement) {
+                        o.material.transparent = true;
+                        o.material.opacity = 0.5;
+                        o.material.depthWrite = false;
+                        o.material.needsUpdate = true;
+                        return;
+                    }
+                    if (isFloor) {
+                        o.material.opacity = 1;
+                        o.material.transparent = false;
+                        o.material.depthWrite = true;
+                        o.material.needsUpdate = true;
+                        return;
+                    }
+                    o.material.transparent = xrayMode;
+                    o.material.opacity = xrayMode ? 0.22 : 1;
+                    o.material.depthWrite = !xrayMode;
+                    o.material.needsUpdate = true;
+                });
+            });
+            $('perspectiveBtn').textContent = `透視樓板：${xrayMode?'開':'關'}`;
+        }
+
+        function setLighting(style) {
+            const themes = {
+                day: { bg: '#dfe7f1', fog: '#dfe7f1', ground: '#c7d0d5', hemi: 2.1, sun: 3, sunColor: '#fff4df',
+                    exposure: 1 },
+                neutral: { bg: '#d6dbe1', fog: '#d6dbe1', ground: '#b9c0c7', hemi: 1.5, sun: 2.1, sunColor: '#ffffff',
+                    exposure: .9 },
+                evening: { bg: '#574f62', fog: '#574f62', ground: '#766a69', hemi: .8, sun: 1.9, sunColor: '#ffb66e',
+                    exposure: .82 },
+                night: { bg: '#151c2d', fog: '#151c2d', ground: '#293344', hemi: .35, sun: .65, sunColor: '#8ca8ff',
+                    exposure: .72 }
+            } [style];
+            scene.background = new THREE.Color(themes.bg);
+            scene.fog.color.set(themes.fg);
+            ground.material.color.set(themes.ground);
+            hemi.intensity = themes.hemi;
+            sun.intensity = themes.sun;
+            sun.color.set(themes.sunColor);
+            renderer.toneMappingExposure = themes.exposure;
+        }
+
+        function selectBuildings(groups) {
+            selectionBoxes.forEach(box => scene.remove(box));
+            selectionBoxes = [];
+            selectedBuildings = groups.filter(g => g !== null);
+            updateAnnotationFloorOptions();
+
+            const scaleInput = $('scaleInput');
+            if (selectedBuildings.length === 0) {
+                $('deleteBuildingBtn').disabled = true;
+                scaleInput.disabled = true;
+                scaleInput.value = 1;
+                $('analysisStatus').textContent = '未選取建築';
+                return;
+            }
+
+            selectedBuildings.forEach(g => {
+                const box = new THREE.BoxHelper(g, '#ff8b36');
+                scene.add(box);
+                selectionBoxes.push(box);
+            });
+
+            $('deleteBuildingBtn').disabled = false;
+            scaleInput.disabled = false;
+            scaleInput.value = selectedBuildings[0].scale.x.toFixed(2);
+
+            const center = new THREE.Vector3();
+            if (selectedBuildings.length > 1) {
+                const avg = new THREE.Vector3();
+                selectedBuildings.forEach(g => {
+                    const c = new THREE.Vector3();
+                    new THREE.Box3().setFromObject(g).getCenter(c);
+                    avg.add(c);
+                });
+                avg.divideScalar(selectedBuildings.length);
+                controls.target.copy(avg);
+            } else {
+                new THREE.Box3().setFromObject(selectedBuildings[0]).getCenter(center);
+                controls.target.copy(center);
+            }
+            controls.update();
+
+            $('analysisStatus').textContent = `已選取 ${selectedBuildings.length} 棟建築 (視角中心已對準)`;
+        }
+
+        function toggleBuildingSelection(building) {
+            if (!building) return;
+            const idx = selectedBuildings.indexOf(building);
+            if (idx >= 0) {
+                const newList = selectedBuildings.filter(b => b !== building);
+                selectBuildings(newList);
+            } else {
+                const newList = [...selectedBuildings, building];
+                selectBuildings(newList);
+            }
+        }
+
+        function deleteSelectedBuildings() {
+            if (selectedBuildings.length === 0) return;
+            const count = selectedBuildings.length;
+            if (!confirm(`確定要刪除 ${count} 棟選取的建築嗎？\n(相關標註與連線也會一併移除)`)) return;
+
+            const toRemove = [...selectedBuildings];
+            toRemove.forEach(building => {
+                if (building === mainBuilding) {
+                    while (mainBuilding.children.length > 0) mainBuilding.remove(mainBuilding.children[0]);
+                    mainBuilding.userData.floors = 0;
+                    mainBuilding.userData.basements = 0;
+                    deleteBuildingAnnotations(building);
+                } else {
+                    const idx = additionsGroup.children.indexOf(building);
+                    if (idx >= 0) {
+                        const prompt = building.userData?.prompt || '';
+                        const i = additionPrompts.indexOf(prompt);
+                        if (i >= 0) additionPrompts.splice(i, 1);
+                        deleteBuildingAnnotations(building);
+                        additionsGroup.remove(building);
+                    }
+                }
+            });
+
+            selectBuildings([]);
+            $('analysisStatus').textContent = `已刪除 ${count} 棟建築。`;
+            autoSave();
+        }
+
+        function deleteBuildingAnnotations(building) {
+            const ids = [];
+            annotations.forEach((data, idx) => {
+                if (data.buildingId === building.userData.buildingId) {
+                    ids.push(idx);
+                }
+            });
+            ids.sort((a, b) => b - a).forEach(idx => {
+                if (annotationObjects[idx] && annotationObjects[idx].parent) {
+                    annotationObjects[idx].parent.remove(annotationObjects[idx]);
+                }
+                annotationObjects.splice(idx, 1);
+                annotations.splice(idx, 1);
+                relations = relations.map(r => ({
+                    id: r.id,
+                    from: r.from > idx ? r.from - 1 : r.from,
+                    to: r.to > idx ? r.to - 1 : r.to,
+                    order: r.order
+                })).filter(r => r.from >= 0 && r.to >= 0);
+                if (selectedAnnotationIndex === idx) selectedAnnotationIndex = -1;
+                else if (selectedAnnotationIndex > idx) selectedAnnotationIndex--;
+            });
+            selectedRelationIds = selectedRelationIds.filter(id => relations.some(r => r.id === id));
+            rebuildAnnotations();
+            $('deleteSelectedAnnotationBtn').disabled = true;
+            $('editAnnotationBtn').disabled = true;
+            $('deleteAllRelationsBtn').disabled = relations.length === 0;
+            $('deleteSelectedRelationsBtn').disabled = selectedRelationIds.length === 0;
+        }
+
+        function adjustSelectedBuilding(floorDelta = 0, basementDelta = 0) {
+            if (selectedBuildings.length === 0) {
+                alert('請先選取要調整的建築。');
+                return;
+            }
+            
+            const target = selectedBuildings[0];
+            
+            if (target === mainBuilding) {
+                const currentFloors = parseInt($('floors').value) || 0;
+                const currentBasements = parseInt($('basements').value) || 0;
+                const newFloors = Math.max(0, currentFloors + floorDelta);
+                const newBasements = Math.max(0, currentBasements + basementDelta);
+                $('floors').value = newFloors;
+                $('basements').value = newBasements;
+                
+                const width = parseFloat($('width').value) || 14;
+                const wallColor = $('wallColor').value;
+                const glassColor = $('glassColor').value;
+                const shape = target.userData.shape || 'box';
+                
+                const pos = mainBuilding.position.clone();
+                const sc = mainBuilding.scale.clone();
+                
+                while (mainBuilding.children.length > 0) {
+                    mainBuilding.remove(mainBuilding.children[0]);
+                }
+                
+                if (newFloors === 0 && newBasements === 0) {
+                    mainBuilding.userData.floors = 0;
+                    mainBuilding.userData.basements = 0;
+                    mainBuilding.position.copy(pos);
+                    mainBuilding.scale.copy(sc);
+                    rebuildAnnotations();
+                    updateXray();
+                    selectBuildings([]);
+                    $('analysisStatus').textContent = '主建築已完全移除 (無樓層)';
+                    autoSave();
+                    return;
+                }
+                
+                const newBuilding = createBuilding(newFloors, newBasements, width, wallColor, glassColor, true, shape);
+                while (newBuilding.children.length > 0) {
+                    const child = newBuilding.children[0];
+                    newBuilding.remove(child);
+                    mainBuilding.add(child);
+                }
+                mainBuilding.userData.floors = newFloors;
+                mainBuilding.userData.basements = newBasements;
+                mainBuilding.userData.width = width;
+                mainBuilding.userData.shape = shape;
+                mainBuilding.position.copy(pos);
+                mainBuilding.scale.copy(sc);
+                
+                rebuildAnnotations();
+                updateXray();
+                if (newFloors > 0 || newBasements > 0) {
+                    selectBuildings([mainBuilding]);
+                } else {
+                    selectBuildings([]);
+                }
+                $('analysisStatus').textContent = `主建築已調整：${newFloors} 層，地下 ${newBasements} 層 (${shape})`;
+                autoSave();
+                return;
+            }
+            
+            const old = target;
+            const oldData = old.userData;
+            if (!oldData || !oldData.isAddition) {
+                alert('請選取新增的建物進行調整。');
+                return;
+            }
+            
+            const newFloors = Math.max(0, (oldData.floors || 3) + floorDelta);
+            const newBasements = Math.max(0, (oldData.basements || 0) + basementDelta);
+            
+            if (newFloors === 0 && newBasements === 0) {
+                const idx = additionsGroup.children.indexOf(old);
+                if (idx >= 0) {
+                    const pIdx = additionPrompts.indexOf(oldData.prompt);
+                    if (pIdx >= 0) additionPrompts.splice(pIdx, 1);
+                    deleteBuildingAnnotations(old);
+                    additionsGroup.remove(old);
+                    selectBuildings([]);
+                    $('analysisStatus').textContent = '建築已完全移除 (無樓層)';
+                }
+                autoSave();
+                return;
+            }
+            
+            const pos = old.position.clone();
+            const sc = old.scale.clone();
+            const shape = oldData.shape || 'box';
+            const width = oldData.width || 14;
+            const depth = oldData.depth || null;
+            const prompt = `${newFloors} 樓 (${shape})`;
+            
+            deleteBuildingAnnotations(old);
+            
+            const idx = additionsGroup.children.indexOf(old);
+            if (idx >= 0) {
+                const pIdx = additionPrompts.indexOf(oldData.prompt);
+                if (pIdx >= 0) additionPrompts.splice(pIdx, 1);
+                additionsGroup.remove(old);
+            }
+            
+            const wallColor = $('wallColor').value;
+            const glassColor = $('glassColor').value;
+            
+            const group = createBuilding(newFloors, newBasements, width, wallColor, glassColor, false, shape, depth);
+            const id = nextBuildingId++;
+            group.userData.buildingId = id;
+            group.userData.isAddition = true;
+            group.userData.floors = newFloors;
+            group.userData.basements = newBasements;
+            group.userData.width = width;
+            group.userData.depth = depth;
+            group.userData.shape = shape;
+            group.userData.prompt = prompt;
+            group.position.copy(pos);
+            group.scale.copy(sc);
+            group.traverse(o => { if (o.isMesh) { o.castShadow = o.receiveShadow = true } });
+            additionsGroup.add(group);
+            additionPrompts.push(prompt);
+            
+            rebuildAnnotations();
+            updateXray();
+            selectBuildings([group]);
+            $('analysisStatus').textContent = `建築已調整：${newFloors} 層，地下 ${newBasements} 層 (${shape})`;
+            autoSave();
+        }
+
+        function applySelectedAppearance() {
+            if (selectedBuildings.length === 0) { alert('請先選取建築。'); return; }
+            selectedBuildings.forEach(building => {
+                if (building === mainBuilding) {
+                    const floors = Math.max(0, parseInt($('floors').value) || 0);
+                    const basements = Math.max(0, parseInt($('basements').value) || 0);
+                    const width = Math.max(5, parseFloat($('width').value) || 14);
+                    const wallColor = $('wallColor').value;
+                    const glassColor = $('glassColor').value;
+                    const shape = building.userData.shape || 'box';
+                    
+                    const pos = mainBuilding.position.clone();
+                    const sc = mainBuilding.scale.clone();
+                    
+                    while (mainBuilding.children.length > 0) mainBuilding.remove(mainBuilding.children[0]);
+                    
+                    if (floors === 0 && basements === 0) {
+                        mainBuilding.userData.floors = 0;
+                        mainBuilding.userData.basements = 0;
+                        mainBuilding.position.copy(pos);
+                        mainBuilding.scale.copy(sc);
+                        return;
+                    }
+                    
+                    const newBuilding = createBuilding(floors, basements, width, wallColor, glassColor, true, shape);
+                    while (newBuilding.children.length > 0) {
+                        const child = newBuilding.children[0];
+                        newBuilding.remove(child);
+                        mainBuilding.add(child);
+                    }
+                    mainBuilding.userData.floors = floors;
+                    mainBuilding.userData.basements = basements;
+                    mainBuilding.userData.width = width;
+                    mainBuilding.userData.shape = shape;
+                    mainBuilding.position.copy(pos);
+                    mainBuilding.scale.copy(sc);
+                } else {
+                    building.traverse(o => {
+                        if (o.isMesh && !o.userData.floor && o.material.name !== 'floor' && !o.userData.isBasement)
+                            o.material.color.set($('wallColor').value);
+                    });
+                }
+            });
+            updateXray();
+            selectBuildings(selectedBuildings);
+            $('analysisStatus').textContent = `已套用外觀色彩至 ${selectedBuildings.length} 棟建築。`;
+            autoSave();
+        }
+
+        function groundPoint(e) {
+            const r = renderer.domElement.getBoundingClientRect();
+            pointer.x = ((e.clientX - r.left) / r.width) * 2 - 1;
+            pointer.y = -((e.clientY - r.top) / r.height) * 2 + 1;
+            raycaster.setFromCamera(pointer, camera);
+            return raycaster.intersectObject(ground)[0]?.point;
+        }
+
+        function drawFootprint(point) {
+            if (!footprintStart) { footprintStart = point;
+                $('mode').textContent = '請點擊第二個對角點'; return; }
+            const minX = Math.min(footprintStart.x, point.x),
+                maxX = Math.max(footprintStart.x, point.x),
+                minZ = Math.min(footprintStart.z, point.z),
+                maxZ = Math.max(footprintStart.z, point.z),
+                w = Math.max(3, maxX - minX),
+                d = Math.max(3, maxZ - minZ),
+                x = (minX + maxX) / 2,
+                z = (minZ + maxZ) / 2;
+            if (footprintPreview) scene.remove(footprintPreview);
+            const floors = Math.max(1, Math.min(30, parseInt($('newBuildingFloors').value) || 3));
+            const shape = $('buildingShape').value || 'box';
+            const p = `${floors} 樓建物 (${shape})`;
+            const wallColor = $('wallColor').value;
+            const glassColor = $('glassColor').value;
+            const group = createBuilding(floors, 0, w, wallColor, glassColor, false, shape, d);
+            const id = nextBuildingId++;
+            group.userData.buildingId = id;
+            group.userData.isAddition = true;
+            group.userData.prompt = p;
+            group.userData.floors = floors;
+            group.userData.basements = 0;
+            group.userData.width = w;
+            group.userData.depth = d;
+            group.userData.shape = shape;
+            group.position.set(x, 0, z);
+            group.scale.set(1, 1, 1);
+            group.traverse(o => { if (o.isMesh) { o.castShadow = o.receiveShadow = true } });
+            additionsGroup.add(group);
+            additionPrompts.push(p);
+            updateXray();
+            $('analysisStatus').textContent = `框選新增建築：${floors} 層 (${shape}) 尺寸 ${w.toFixed(1)} x ${d.toFixed(1)}`;
+            selectBuildings([group]);
+            footprintStart = null;
+            clearModes();
+            autoSave();
+        }
+
+        function clearModes() {
+            annotationMode = selectionMode = footprintMode = relationMode = multiLinkMode = moveMode =
+                lineSelectMode = deleteMode = false;
+            footprintStart = null;
+            if (footprintPreview) { scene.remove(footprintPreview);
+                footprintPreview = null; }
+            ['annotationBtn', 'selectBtn', 'footprintBtn', 'relationBtn', 'multiLinkBtn', 'moveBtn', 'lineSelectBtn',
+                'topMoveBtn', 'topAnnotationBtn', 'topDeleteBtn'
+            ].forEach(
+                id => $(id).classList.remove('active', 'primary', 'active-tool'));
+            $('mode').classList.remove('show');
+            renderer.domElement.style.cursor = 'grab';
+            if (!multiLinkMode) {
+                selectedForLink.forEach(i => { if (annotationObjects[i]) annotationObjects[i].element.classList.remove(
+                        'selected'); });
+                selectedForLink = [];
+                updateMultiLinkUI();
+            }
+            clearRelationSelection();
+            relationStart = null;
+            if (isDragging) {
+                isDragging = false;
+                dragTarget = null;
+            }
+        }
+
+        function addAnnotation(point, text, icon = $('annotationIcon').value, color = $('annotationColor').value,
+            parentGroup = mainBuilding, floorValue = null) {
+            const el = document.createElement('div');
+            el.className = 'annotation';
+            el.textContent = text;
+            el.style.pointerEvents = 'auto';
+            el.style.setProperty('--symbol', `"${icon}"`);
+            el.style.setProperty('--accent', color);
+            const obj = new CSS2DObject(el);
+
+            const localPos = parentGroup.worldToLocal(point.clone());
+            obj.position.copy(localPos);
+            parentGroup.add(obj);
+
+            const buildingId = parentGroup.userData.buildingId !== undefined ? parentGroup.userData.buildingId : 0;
+            const record = {
+                position: point.toArray(),
+                text,
+                icon,
+                color,
+                buildingId: buildingId,
+                floor: (floorValue && floorValue !== 'surface') ? floorValue : null
+            };
+            const index = annotations.length;
+            annotations.push(record);
+            annotationObjects.push(obj);
+            el.dataset.index = index;
+
+            attachAnnotationInteraction(el, index);
+
+            updateAnnotationBadges();
+            $('analysisStatus').textContent = `已新增標示：「${text}」 (${icon})`;
+            autoSave();
+            return record;
+        }
+
+        function getBuildingGroupFromHit(hit) {
+            if (!hit) return mainBuilding;
+            if (hit.object === ground) return groundGroup;
+            let obj = hit.object;
+            while (obj.parent && obj.parent !== mainBuilding && obj.parent !== additionsGroup) {
+                obj = obj.parent;
+            }
+            if (obj === mainBuilding || obj.parent === mainBuilding) return mainBuilding;
+            if (obj.parent === additionsGroup) return obj;
+            return mainBuilding;
+        }
+
+        function getBuildingFromMesh(meshObj) {
+            let g = meshObj;
+            while (g.parent && g.parent !== mainBuilding && g.parent !== additionsGroup) {
+                g = g.parent;
+            }
+            if (g.parent === mainBuilding) return mainBuilding;
+            if (g.parent === additionsGroup) return g;
+            return null;
+        }
+
+        function getBuildingFromRaycast(event) {
+            const r = renderer.domElement.getBoundingClientRect();
+            pointer.x = ((event.clientX - r.left) / r.width) * 2 - 1;
+            pointer.y = -((event.clientY - r.top) / r.height) * 2 + 1;
+            raycaster.setFromCamera(pointer, camera);
+
+            const targets = [];
+            mainBuilding.traverse(o => { if (o.isMesh) targets.push(o); });
+            additionsGroup.traverse(o => { if (o.isMesh) targets.push(o); });
+
+            const hit = raycaster.intersectObjects(targets, false)[0];
+            if (hit && hit.object.isMesh) {
+                return getBuildingFromMesh(hit.object);
+            }
+            return null;
+        }
+
+        function getGroundIntersect(event) {
+            const r = renderer.domElement.getBoundingClientRect();
+            pointer.x = ((event.clientX - r.left) / r.width) * 2 - 1;
+            pointer.y = -((event.clientY - r.top) / r.height) * 2 + 1;
+            raycaster.setFromCamera(pointer, camera);
+            const hits = raycaster.intersectObject(ground);
+            if (hits.length > 0) return hits[0].point;
+            return null;
+        }
+
+        // === 樓層平面標註 (可在任一樓層平面任意點新增標註，不受限於外牆表面) ===
+        function getAnnotationTargetBuilding() {
+            if (selectedBuildings.length > 0) return selectedBuildings[0];
+            if (mainBuilding.userData.floors > 0) return mainBuilding;
+            return null;
+        }
+
+        function updateAnnotationFloorOptions() {
+            const select = $('annotationFloorSelect');
+            if (!select) return;
+            const prevValue = select.value;
+            const building = getAnnotationTargetBuilding();
+            select.innerHTML = '';
+            const surfaceOpt = document.createElement('option');
+            surfaceOpt.value = 'surface';
+            surfaceOpt.textContent = '依畫面點擊 (建物表面)';
+            select.appendChild(surfaceOpt);
+
+            const floors = building ? (building.userData.floors || 0) : 0;
+            for (let k = 1; k <= floors; k++) {
+                const opt = document.createElement('option');
+                opt.value = String(k);
+                opt.textContent = k === 1 ? '1樓 (地面樓板任意點)' : `${k}樓 (樓板任意點)`;
+                select.appendChild(opt);
+            }
+            const basements = building ? (building.userData.basements || 0) : 0;
+            for (let b = 1; b <= basements; b++) {
+                const opt = document.createElement('option');
+                opt.value = `b${b}`;
+                opt.textContent = `地下${b}樓 (樓板任意點)`;
+                select.appendChild(opt);
+            }
+
+            const values = Array.from(select.options).map(o => o.value);
+            select.value = values.includes(prevValue) ? prevValue : 'surface';
+        }
+
+        // 取得指定樓層在建物本地座標中的 Y 高度 (與 createBuilding 的樓板生成邏輯對應)
+        function getFloorLocalY(floorValue, building) {
+            if (floorValue === 'surface') return null;
+            if (typeof floorValue === 'string' && floorValue.startsWith('b')) {
+                const b = parseInt(floorValue.slice(1), 10);
+                const basements = (building && building.userData.basements) || 0;
+                // 最底層地下室：使用最底部樓板；其餘地下室：使用下一層天花板樓板
+                if (b >= basements) return -basements * STORY_HEIGHT + 0.18;
+                return -b * STORY_HEIGHT - 0.18;
+            }
+            const k = parseInt(floorValue, 10);
+            if (k <= 1) return 0;
+            return (k - 1) * STORY_HEIGHT - 0.18;
+        }
+
+        // 將世界座標點限制在建物該樓層平面範圍內 (方形以寬深為界，圓柱以半徑為界)，並校正到該樓層高度
+        function clampPointToFloorBounds(building, worldPoint, localY) {
+            const localPoint = building.worldToLocal(worldPoint.clone());
+            const w = building.userData.width || 14;
+            const shape = building.userData.shape || 'box';
+            const d = building.userData.depth || (shape === 'cylinder' ? w : w * 0.67);
+
+            if (shape === 'cylinder') {
+                const maxR = Math.max(0.5, w / 2 - 0.3);
+                const dist = Math.hypot(localPoint.x, localPoint.z);
+                if (dist > maxR && dist > 0) {
+                    const s = maxR / dist;
+                    localPoint.x *= s;
+                    localPoint.z *= s;
+                }
+            } else {
+                const maxX = Math.max(0.5, w / 2 - 0.3);
+                const maxZ = Math.max(0.5, d / 2 - 0.3);
+                localPoint.x = Math.max(-maxX, Math.min(maxX, localPoint.x));
+                localPoint.z = Math.max(-maxZ, Math.min(maxZ, localPoint.z));
+            }
+            localPoint.y = localY;
+            return building.localToWorld(localPoint.clone());
+        }
+
+        // 以水平數學平面計算點擊位置 (可略過遮擋的牆面/樓板，命中該樓層平面上任一點)，
+        // 並將結果限制在建物的平面範圍內。用於「單次點擊新增標註」，一次點擊即為目標位置，較無角度問題。
+        function computeFloorClickPoint(event, building, localY) {
+            const r = renderer.domElement.getBoundingClientRect();
+            pointer.x = ((event.clientX - r.left) / r.width) * 2 - 1;
+            pointer.y = -((event.clientY - r.top) / r.height) * 2 + 1;
+            raycaster.setFromCamera(pointer, camera);
+
+            const worldOrigin = building.localToWorld(new THREE.Vector3(0, localY, 0));
+            const worldUp = building.localToWorld(new THREE.Vector3(0, localY + 1, 0));
+            const normal = worldUp.sub(worldOrigin).normalize();
+            const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, worldOrigin);
+            const worldPoint = new THREE.Vector3();
+            if (!raycaster.ray.intersectPlane(plane, worldPoint)) return null;
+
+            return clampPointToFloorBounds(building, worldPoint, localY);
+        }
+
+        function startDrag(event, building) {
+            if (!building) return;
+            dragTarget = building;
+            const pt = getGroundIntersect(event);
+            if (!pt) { dragTarget = null; return; }
+            dragStartPos.copy(building.position);
+            dragOffset.copy(pt).sub(building.position);
+            isDragging = true;
+            renderer.domElement.style.cursor = 'grabbing';
+            $('analysisStatus').textContent = `拖曳中… (${building === mainBuilding ? '主建築' : '新增建築'})`;
+            controls.enabled = false;
+        }
+
+        function updateDrag(event) {
+            if (!isDragging || !dragTarget) return;
+            const pt = getGroundIntersect(event);
+            if (!pt) return;
+            const newPos = pt.clone().sub(dragOffset);
+            newPos.y = 0;
+            const delta = newPos.clone().sub(dragStartPos);
+            dragTarget.position.copy(newPos);
+
+            annotations.forEach((data, idx) => {
+                const obj = annotationObjects[idx];
+                if (obj && obj.parent === dragTarget) {
+                    const worldPos = obj.position.clone();
+                    obj.parent.localToWorld(worldPos);
+                    data.position[0] = worldPos.x;
+                    data.position[1] = worldPos.y;
+                    data.position[2] = worldPos.z;
+                }
+            });
+            rebuildRelations();
+
+            selectionBoxes.forEach(box => scene.remove(box));
+            selectionBoxes = [];
+            selectedBuildings.forEach(g => {
+                const box = new THREE.BoxHelper(g, '#ff8b36');
+                scene.add(box);
+                selectionBoxes.push(box);
+            });
+        }
+
+        function endDrag() {
+            if (isDragging && dragTarget) {
+                $('analysisStatus').textContent = `已移動${dragTarget === mainBuilding ? '主建築' : '新增建築'} 至 (${dragTarget.position.x.toFixed(1)}, ${dragTarget.position.z.toFixed(1)})`;
+                rebuildRelations();
+                autoSave();
+            }
+            isDragging = false;
+            dragTarget = null;
+            controls.enabled = true;
+            renderer.domElement.style.cursor = moveMode ? 'grab' : 'grab';
+        }
+
+        function updateScale(val) {
+            if (selectedBuildings.length === 0) return;
+            const s = parseFloat(val);
+            if (isNaN(s) || s < 0.1) return;
+            selectedBuildings.forEach(building => {
+                building.scale.set(s, s, s);
+            });
+            selectionBoxes.forEach(box => scene.remove(box));
+            selectionBoxes = [];
+            selectedBuildings.forEach(g => {
+                const box = new THREE.BoxHelper(g, '#ff8b36');
+                scene.add(box);
+                selectionBoxes.push(box);
+            });
+            annotations.forEach((data, idx) => {
+                const obj = annotationObjects[idx];
+                if (obj && obj.parent === selectedBuildings[0]) {
+                    const worldPos = obj.position.clone();
+                    obj.parent.localToWorld(worldPos);
+                    data.position[0] = worldPos.x;
+                    data.position[1] = worldPos.y;
+                    data.position[2] = worldPos.z;
+                }
+            });
+            rebuildRelations();
+            $('analysisStatus').textContent = `縮放比例設為 ${s.toFixed(2)} (套用至 ${selectedBuildings.length} 棟)`;
+            autoSave();
+        }
+
+        // === 更新檔案名稱 ===
+        function updateFileName(name) {
+            const el = document.getElementById('projectFileName');
+            if (el) el.textContent = name || '3D 建築視圖';
+        }
+
+        // === 自動儲存與還原 ===
+        const STORAGE_KEY = 'forma_autosave';
+
+        function getProjectData() {
+            const data = {
+                version: 20,
+                settings: ['floors', 'basements', 'width', 'wallColor', 'glassColor', 'lightingPreset']
+                    .reduce((o, id) => (o[id] = $(id).value, o), {}),
+                annotations: annotations.map(a => ({ ...a })),
+                relations: relations.map(r => ({ ...r })),
+                additionPrompts: [...additionPrompts],
+                xrayMode,
+                onlyBasement,
+                lineColor: $('lineColor').value,
+                lineWidth: $('lineWidth').value,
+                mainBuildingPosition: mainBuilding.position.toArray(),
+                mainBuildingScale: mainBuilding.scale.toArray(),
+                mainBuildingData: {
+                    floors: mainBuilding.userData.floors || 0,
+                    basements: mainBuilding.userData.basements || 0,
+                    width: mainBuilding.userData.width || 14,
+                    shape: mainBuilding.userData.shape || 'box'
+                },
+                additionsData: additionsGroup.children.map(g => ({
+                    id: g.userData.buildingId,
+                    position: g.position.toArray(),
+                    scale: g.scale.toArray(),
+                    prompt: g.userData.prompt,
+                    shape: g.userData.shape || 'box',
+                    floors: g.userData.floors,
+                    basements: g.userData.basements,
+                    width: g.userData.width,
+                    depth: g.userData.depth
+                })),
+                nextBuildingId: nextBuildingId,
+                nextRelationId: nextRelationId,
+                projectName: document.getElementById('projectFileName').textContent
+            };
+            return data;
+        }
+
+        function autoSave() {
+            try {
+                const data = getProjectData();
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+            } catch (e) { console.warn('自動儲存失敗', e); }
+        }
+
+        function loadProjectData(data) {
+            annotations = [];
+            annotationObjects = [];
+            relations = [];
+            relationGroup.clear();
+            additionsGroup.clear();
+            additionPrompts = [];
+            selectedAnnotationIndex = -1;
+            selectedForLink = [];
+            selectedRelationIds = [];
+            selectedBuildings = [];
+            selectionBoxes.forEach(box => scene.remove(box));
+            selectionBoxes = [];
+            nextBuildingId = data.nextBuildingId || 1;
+            nextRelationId = data.nextRelationId || 1;
+            
+            Object.entries(data.settings || {}).forEach(([id, v]) => { if ($(id)) $(id).value = v; });
+            if (data.lineColor) $('lineColor').value = data.lineColor;
+            if (data.lineWidth) $('lineWidth').value = data.lineWidth;
+            setLighting($('lightingPreset').value);
+            xrayMode = !!data.xrayMode;
+            onlyBasement = !!data.onlyBasement;
+
+            while (mainBuilding.children.length > 0) mainBuilding.remove(mainBuilding.children[0]);
+            if (data.mainBuildingData && data.mainBuildingData.floors > 0) {
+                const md = data.mainBuildingData;
+                const group = createBuilding(md.floors, md.basements, md.width,
+                    data.settings?.wallColor || '#e5e1d8',
+                    data.settings?.glassColor || '#557c9c', true, md.shape || 'box');
+                group.userData.buildingId = 0;
+                group.userData.isMain = true;
+                group.userData.floors = md.floors;
+                group.userData.basements = md.basements;
+                group.userData.width = md.width;
+                group.userData.shape = md.shape || 'box';
+                while (group.children.length > 0) {
+                    const child = group.children[0];
+                    group.remove(child);
+                    mainBuilding.add(child);
+                }
+                if (data.mainBuildingPosition) mainBuilding.position.set(...data.mainBuildingPosition);
+                if (data.mainBuildingScale) mainBuilding.scale.set(...data.mainBuildingScale);
+            }
+
+            (data.additionsData || []).forEach(ad => {
+                const prompt = ad.prompt || `${ad.floors||3} 樓建物`;
+                const shape = ad.shape || 'box';
+                const wallColor = data.settings?.wallColor || '#e5e1d8';
+                const glassColor = data.settings?.glassColor || '#557c9c';
+                const group = createBuilding(ad.floors || 3, ad.basements || 0, ad.width || 11,
+                    wallColor, glassColor, false, shape, ad.depth || null);
+                const id = ad.id || nextBuildingId++;
+                group.userData.buildingId = id;
+                group.userData.isAddition = true;
+                group.userData.floors = ad.floors || 3;
+                group.userData.basements = ad.basements || 0;
+                group.userData.width = ad.width || 11;
+                group.userData.depth = ad.depth || null;
+                group.userData.shape = shape;
+                group.userData.prompt = prompt;
+                group.position.set(ad.position[0], 0, ad.position[2]);
+                if (ad.scale) group.scale.set(...ad.scale);
+                group.traverse(o => { if (o.isMesh) { o.castShadow = o.receiveShadow = true } });
+                additionsGroup.add(group);
+                additionPrompts.push(prompt);
+            });
+
+            (data.annotations || []).forEach(a => {
+                const parent = findBuildingById(a.buildingId) || mainBuilding;
+                const el = document.createElement('div');
+                el.className = 'annotation';
+                el.textContent = a.text;
+                el.style.pointerEvents = 'auto';
+                el.style.setProperty('--symbol', `"${a.icon || '●'}"`);
+                el.style.setProperty('--accent', a.color || '#5f8aff');
+                const obj = new CSS2DObject(el);
+                const localPos = parent.worldToLocal(new THREE.Vector3(...a.position));
+                obj.position.copy(localPos);
+                parent.add(obj);
+                const index = annotations.length;
+                annotations.push({ ...a });
+                annotationObjects.push(obj);
+                el.dataset.index = index;
+                attachAnnotationInteraction(el, index);
+            });
+
+            (data.relations || []).forEach(r => {
+                if (annotations[r.from] && annotations[r.to]) {
+                    const color = new THREE.Color($('lineColor').value || '#ff8b36');
+                    const width = parseFloat($('lineWidth').value || '3');
+                    const relationRecord = { id: r.id || nextRelationId++, from: r.from, to: r.to, order: r.order || 1 };
+                    const obj = drawRelation(annotations[r.from], annotations[r.to], relationRecord.order, color, width, relationRecord);
+                    if (obj) relations.push(relationRecord);
+                }
+            });
+
+            $('deleteAllRelationsBtn').disabled = relations.length === 0;
+            updateAnnotationBadges();
+            updateXray();
+            selectBuildings([]);
+            updateMultiLinkUI();
+            $('deleteSelectedAnnotationBtn').disabled = true;
+            $('editAnnotationBtn').disabled = true;
+            $('deleteSelectedRelationsBtn').disabled = true;
+            $('deleteSelectedAnnotationsBtn').disabled = true;
+            $('confirmMultiLinkBtn').disabled = true;
+            $('clearLinkSelectionBtn').disabled = true;
+            $('deleteBuildingBtn').disabled = true;
+
+            if (data.projectName) updateFileName(data.projectName);
+            $('analysisStatus').textContent = '已還原自動儲存的專案。';
+        }
+
+        function loadAutoSave() {
+            try {
+                const raw = localStorage.getItem(STORAGE_KEY);
+                if (!raw) return false;
+                const data = JSON.parse(raw);
+                if (!data.version) return false;
+                loadProjectData(data);
+                return true;
+            } catch (e) { console.warn('讀取自動儲存失敗', e); return false; }
+        }
+
+        // === 開啟新檔 ===
+        function newProject() {
+            if (!confirm('確定要開啟新檔嗎？目前編輯的內容將會遺失。')) return;
+            localStorage.removeItem(STORAGE_KEY);
+            annotations = [];
+            annotationObjects = [];
+            relations = [];
+            relationGroup.clear();
+            additionsGroup.clear();
+            additionPrompts = [];
+            selectedAnnotationIndex = -1;
+            selectedForLink = [];
+            selectedRelationIds = [];
+            selectedBuildings = [];
+            selectionBoxes.forEach(box => scene.remove(box));
+            selectionBoxes = [];
+            nextBuildingId = 1;
+            nextRelationId = 1;
+            onlyBasement = false;
+            xrayMode = false;
+            
+            while (mainBuilding.children.length > 0) mainBuilding.remove(mainBuilding.children[0]);
+            mainBuilding.userData.floors = 0;
+            mainBuilding.userData.basements = 0;
+            mainBuilding.userData.width = 14;
+            mainBuilding.userData.shape = 'box';
+            mainBuilding.position.set(0, 0, 0);
+            mainBuilding.scale.set(1, 1, 1);
+            
+            $('floors').value = 5;
+            $('basements').value = 0;
+            $('width').value = 14;
+            $('wallColor').value = '#e5e1d8';
+            $('glassColor').value = '#557c9c';
+            $('lightingPreset').value = 'day';
+            $('lineColor').value = '#ff8b36';
+            $('lineWidth').value = '3';
+            $('lineWidthValue').textContent = '3';
+            
+            updateXray();
+            setLighting('day');
+            updateFileName('3D 建築視圖');
+            $('analysisStatus').textContent = '已開啟新專案';
+            controls.target.set(0, 0, 0);
+            controls.update();
+            autoSave();
+        }
+
+        // === EVENT BINDINGS ===
+        $('generateBtn').onclick = addNewBuilding;
+        $('showOnlyBasementBtn').onclick = showOnlyBasement;
+
+        function toggleAnnotationMode() {
+            const next = !annotationMode;
+            clearModes();
+            annotationMode = next;
+            $('annotationBtn').classList.toggle('active', next);
+            $('topAnnotationBtn').classList.toggle('active-tool', next);
+            $('mode').textContent = '點擊建築表面或地面任意處放置標示 (或於左側選擇樓層後點擊該樓層任意處)';
+            $('mode').classList.toggle('show', next);
+            renderer.domElement.style.cursor = next ? 'crosshair' : 'grab';
+            if (next) updateAnnotationFloorOptions();
+        }
+        $('annotationBtn').onclick = toggleAnnotationMode;
+        $('topAnnotationBtn').onclick = toggleAnnotationMode;
+        $('perspectiveBtn').onclick = () => { xrayMode = !xrayMode;
+            updateXray();
+            autoSave(); };
+        $('lightingPreset').onchange = e => { setLighting(e.target.value);
+            autoSave(); };
+        $('footprintBtn').onclick = () => {
+            const next = !footprintMode;
+            clearModes();
+            footprintMode = next;
+            $('footprintBtn').classList.toggle('active', next);
+            $('mode').textContent = '點擊地面第一個角點';
+            $('mode').classList.toggle('show', next);
+            renderer.domElement.style.cursor = next ? 'crosshair' : 'grab';
+        };
+        $('selectBtn').onclick = () => {
+            const next = !selectionMode;
+            clearModes();
+            selectionMode = next;
+            $('selectBtn').classList.toggle('active', next);
+            $('mode').textContent = '點擊建物以選取 (Shift 多選)';
+            $('mode').classList.toggle('show', next);
+        };
+        function toggleMoveMode() {
+            const next = !moveMode;
+            clearModes();
+            moveMode = next;
+            $('moveBtn').classList.toggle('active', next);
+            $('topMoveBtn').classList.toggle('active-tool', next);
+            $('mode').textContent = next ? '點擊建物拖曳移動 (僅限地面)' : '';
+            $('mode').classList.toggle('show', next);
+            renderer.domElement.style.cursor = next ? 'grab' : 'grab';
+            if (!next) endDrag();
+        }
+        $('moveBtn').onclick = toggleMoveMode;
+        $('topMoveBtn').onclick = toggleMoveMode;
+
+        $('topDeleteBtn').onclick = () => {
+            const next = !deleteMode;
+            clearModes();
+            deleteMode = next;
+            $('topDeleteBtn').classList.toggle('active-tool', next);
+            $('mode').textContent = next ? '點擊建物即可刪除' : '';
+            $('mode').classList.toggle('show', next);
+            renderer.domElement.style.cursor = next ? 'crosshair' : 'grab';
+        };
+        $('relationBtn').onclick = () => {
+            if (annotations.length < 2) { alert('需要至少兩個標註點。'); return; }
+            const next = !relationMode;
+            clearModes();
+            relationMode = next;
+            $('relationBtn').classList.toggle('active', next);
+            $('mode').textContent = '依序點選兩個標註點';
+            $('mode').classList.toggle('show', next);
+        };
+        $('multiLinkBtn').onclick = () => {
+            if (annotations.length < 2) { alert('需要至少兩個標註點。'); return; }
+            const next = !multiLinkMode;
+            clearModes();
+            multiLinkMode = next;
+            $('multiLinkBtn').classList.toggle('active', next);
+            if (next) {
+                $('mode').textContent = '依序點擊標註點選取 (再點取消)';
+                $('mode').classList.add('show');
+                renderer.domElement.style.cursor = 'pointer';
+                selectedForLink = [];
+                updateMultiLinkUI();
+                $('confirmMultiLinkBtn').disabled = true;
+                $('clearLinkSelectionBtn').disabled = true;
+                $('deleteSelectedAnnotationsBtn').disabled = true;
+            } else {
+                $('mode').classList.remove('show');
+                selectedForLink.forEach(i => { if (annotationObjects[i]) annotationObjects[i].element.classList.remove(
+                        'selected'); });
+                selectedForLink = [];
+                updateMultiLinkUI();
+                renderer.domElement.style.cursor = 'grab';
+            }
+        };
+        $('confirmMultiLinkBtn').onclick = confirmMultiLink;
+        $('clearLinkSelectionBtn').onclick = clearLinkSelection;
+        $('deleteSelectedAnnotationsBtn').onclick = deleteSelectedAnnotations;
+        $('deleteSelectedAnnotationBtn').onclick = deleteSelectedAnnotation;
+        $('deleteAllRelationsBtn').onclick = deleteAllRelations;
+        $('lineSelectBtn').onclick = () => {
+            const next = !lineSelectMode;
+            clearModes();
+            lineSelectMode = next;
+            $('lineSelectBtn').classList.toggle('active', next);
+            $('mode').textContent = '點擊連線以選取 (可複選)，選取後按「刪除選取連線」';
+            $('mode').classList.toggle('show', next);
+            renderer.domElement.style.cursor = next ? 'pointer' : 'grab';
+        };
+        $('deleteSelectedRelationsBtn').onclick = deleteSelectedRelations;
+        $('annotationSearchBtn').onclick = () => searchAnnotation($('annotationSearchInput').value);
+        $('annotationSearchInput').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                searchAnnotation($('annotationSearchInput').value);
+            }
         });
-      }
+        $('editAnnotationBtn').onclick = editSelectedAnnotation;
+        $('deleteBuildingBtn').onclick = deleteSelectedBuildings;
+
+        $('floorDownBtn').onclick = () => adjustSelectedBuilding(-1, 0);
+        $('floorUpBtn').onclick = () => adjustSelectedBuilding(1, 0);
+        $('basementDownBtn').onclick = () => adjustSelectedBuilding(0, -1);
+        $('basementUpBtn').onclick = () => adjustSelectedBuilding(0, 1);
+        $('applyAppearanceBtn').onclick = applySelectedAppearance;
+        $('annotationDepth').oninput = e => { $('depthValue').textContent = `${e.target.value}%：${e.target.value==0?'表層':'向內'}` };
+        $('lineWidth').oninput = e => {
+            $('lineWidthValue').textContent = e.target.value;
+            rebuildRelations();
+            autoSave();
+        };
+        $('lineColor').onchange = () => { rebuildRelations();
+            autoSave(); };
+        $('newProjectBtn').onclick = newProject;
+
+        // === 標註點 X/Y/Z 軸微調控制 ===
+        document.querySelectorAll('.axis-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const axis = parseInt(btn.dataset.axis, 10);
+                const dir = parseInt(btn.dataset.dir, 10);
+                nudgeSelectedAnnotation(axis, dir);
+            });
+        });
+        $('axisMoveX').addEventListener('change', e => setSelectedAnnotationAxis(0, e.target.value));
+        $('axisMoveY').addEventListener('change', e => setSelectedAnnotationAxis(1, e.target.value));
+        $('axisMoveZ').addEventListener('change', e => setSelectedAnnotationAxis(2, e.target.value));
+
+        // === SIDEBAR COLLAPSE ===
+        const sidebarEl = document.querySelector('.sidebar');
+        const sidebarToggleBtn = $('sidebarToggleBtn');
+        let sidebarCollapsed = false;
+        function setSidebarCollapsed(collapsed) {
+            sidebarCollapsed = collapsed;
+            sidebarEl.classList.toggle('collapsed', collapsed);
+            sidebarToggleBtn.textContent = collapsed ? '›' : '‹';
+            sidebarToggleBtn.title = collapsed ? '展開功能欄' : '收合功能欄';
+            sidebarToggleBtn.setAttribute('aria-label', sidebarToggleBtn.title);
+        }
+        sidebarToggleBtn.onclick = () => setSidebarCollapsed(!sidebarCollapsed);
+        sidebarEl.addEventListener('transitionend', (e) => {
+            if (e.propertyName === 'width' || e.propertyName === 'flex-basis' || e.propertyName === 'max-height') resize();
+        });
+
+        const scaleInput = $('scaleInput');
+        scaleInput.addEventListener('input', (e) => {
+            if (selectedBuildings.length === 0) return;
+            updateScale(e.target.value);
+        });
+
+        // 點擊建築自動聚焦 (不須切換選取模式)
+        renderer.domElement.addEventListener('click', (e) => {
+            // 如果正在拖曳或處於特定模式則跳過
+            if (isDragging) return;
+            if (annotationMode || footprintMode || relationMode || multiLinkMode || lineSelectMode || deleteMode) return;
+
+            const r = renderer.domElement.getBoundingClientRect();
+            pointer.x = ((e.clientX - r.left) / r.width) * 2 - 1;
+            pointer.y = -((e.clientY - r.top) / r.height) * 2 + 1;
+            raycaster.setFromCamera(pointer, camera);
+
+            const targets = [];
+            mainBuilding.traverse(o => { if (o.isMesh) targets.push(o); });
+            additionsGroup.traverse(o => { if (o.isMesh) targets.push(o); });
+
+            const hit = raycaster.intersectObjects(targets, false)[0];
+            if (hit) {
+                let g = hit.object;
+                while (g.parent && g.parent !== mainBuilding && g.parent !== additionsGroup) {
+                    g = g.parent;
+                }
+                let building = null;
+                if (g.parent === mainBuilding) building = mainBuilding;
+                else if (g.parent === additionsGroup) building = g;
+                if (building) {
+                    // 自動選取並聚焦
+                    selectBuildings([building]);
+                    return;
+                }
+            }
+            // 點到空白處取消選取
+            if (!e.shiftKey) selectBuildings([]);
+        });
+
+        // 保留移動模式的拖曳邏輯
+        renderer.domElement.addEventListener('mousedown', (e) => {
+            if (moveMode) {
+                const building = getBuildingFromRaycast(e);
+                if (building) {
+                    startDrag(e, building);
+                    return;
+                }
+                if (isDragging) endDrag();
+                return;
+            }
+        });
+
+        renderer.domElement.addEventListener('mousemove', (e) => {
+            if (moveMode && isDragging) {
+                updateDrag(e);
+                return;
+            }
+            if (moveMode && !isDragging) {
+                const building = getBuildingFromRaycast(e);
+                renderer.domElement.style.cursor = building ? 'grab' : 'default';
+            }
+        });
+
+        renderer.domElement.addEventListener('mouseup', (e) => {
+            if (moveMode && isDragging) {
+                endDrag();
+                return;
+            }
+        });
+
+        renderer.domElement.addEventListener('mouseleave', () => {
+            if (isDragging) endDrag();
+        });
+
+        // 手機觸控：移動模式的拖曳邏輯 (對應上面的滑鼠邏輯)
+        function getTouchPoint(e) {
+            const t = e.touches[0] || e.changedTouches[0];
+            return t ? { clientX: t.clientX, clientY: t.clientY } : null;
+        }
+
+        renderer.domElement.addEventListener('touchstart', (e) => {
+            if (!moveMode) return;
+            if (e.touches.length !== 1) return;
+            const pt = getTouchPoint(e);
+            if (!pt) return;
+            const building = getBuildingFromRaycast(pt);
+            if (building) {
+                e.preventDefault();
+                startDrag(pt, building);
+                return;
+            }
+            if (isDragging) endDrag();
+        }, { passive: false });
+
+        renderer.domElement.addEventListener('touchmove', (e) => {
+            if (moveMode && isDragging) {
+                const pt = getTouchPoint(e);
+                if (pt) {
+                    e.preventDefault();
+                    updateDrag(pt);
+                }
+            }
+        }, { passive: false });
+
+        renderer.domElement.addEventListener('touchend', (e) => {
+            if (moveMode && isDragging) {
+                e.preventDefault();
+                endDrag();
+            }
+        }, { passive: false });
+
+        renderer.domElement.addEventListener('touchcancel', () => {
+            if (isDragging) endDrag();
+        });
+
+        // 框選模式仍保留
+        renderer.domElement.addEventListener('click', (e) => {
+            if (isDragging) return;
+            if (footprintMode) {
+                const p = groundPoint(e);
+                if (p) drawFootprint(p);
+                return;
+            }
+            if (annotationMode) {
+                const floorSel = $('annotationFloorSelect') ? $('annotationFloorSelect').value : 'surface';
+                if (floorSel !== 'surface') {
+                    const targetBuilding = getAnnotationTargetBuilding();
+                    if (!targetBuilding) { $('analysisStatus').textContent = '請先選取一棟建物以指定樓層'; return; }
+                    const localY = getFloorLocalY(floorSel, targetBuilding);
+                    const point = computeFloorClickPoint(e, targetBuilding, localY);
+                    if (!point) return;
+                    const text = prompt('請輸入標示文字', '');
+                    if (text === null || text.trim() === '') return;
+                    addAnnotation(point, text.trim(), $('annotationIcon').value, $('annotationColor').value,
+                        targetBuilding, floorSel);
+                    return;
+                }
+
+                const r = renderer.domElement.getBoundingClientRect();
+                pointer.x = ((e.clientX - r.left) / r.width) * 2 - 1;
+                pointer.y = -((e.clientY - r.top) / r.height) * 2 + 1;
+                raycaster.setFromCamera(pointer, camera);
+
+                const targets = [];
+                mainBuilding.traverse(o => { if (o.isMesh) targets.push(o); });
+                additionsGroup.traverse(o => { if (o.isMesh) targets.push(o); });
+
+                const hit = raycaster.intersectObjects(targets, false)[0];
+                let point, parentGroup;
+                if (hit) {
+                    let g = hit.object;
+                    while (g.parent && g.parent !== mainBuilding && g.parent !== additionsGroup) {
+                        g = g.parent;
+                    }
+                    parentGroup = (g.parent === additionsGroup) ? g : mainBuilding;
+                    point = hit.point.clone();
+                } else {
+                    // 未點中建築物表面時，改為在地面/場地任意點標註
+                    const groundHit = raycaster.intersectObject(ground)[0];
+                    if (!groundHit) return;
+                    point = groundHit.point.clone();
+                    parentGroup = groundGroup;
+                }
+                const text = prompt('請輸入標示文字', '');
+                if (text === null || text.trim() === '') return;
+                addAnnotation(point, text.trim(), $('annotationIcon').value, $('annotationColor').value,
+                    parentGroup);
+                return;
+            }
+            if (deleteMode) {
+                const building = getBuildingFromRaycast(e);
+                if (building) {
+                    selectBuildings([building]);
+                    deleteSelectedBuildings();
+                }
+                return;
+            }
+            if (lineSelectMode) {
+                const r = renderer.domElement.getBoundingClientRect();
+                pointer.x = ((e.clientX - r.left) / r.width) * 2 - 1;
+                pointer.y = -((e.clientY - r.top) / r.height) * 2 + 1;
+                raycaster.setFromCamera(pointer, camera);
+
+                const hit = raycaster.intersectObjects(relationGroup.children, true)[0];
+                if (hit) {
+                    let g = hit.object;
+                    while (g && g.parent !== relationGroup) g = g.parent;
+                    if (g && g.userData.relationId != null) {
+                        toggleRelationSelection(g.userData.relationId, g);
+                    }
+                } else {
+                    $('analysisStatus').textContent = '未點中任何連線';
+                }
+                return;
+            }
+            // 其他模式維持原有行為，但排除selectionMode（因為已經用點擊聚焦取代）
+            if (selectionMode) {
+                const r = renderer.domElement.getBoundingClientRect();
+                pointer.x = ((e.clientX - r.left) / r.width) * 2 - 1;
+                pointer.y = -((e.clientY - r.top) / r.height) * 2 + 1;
+                raycaster.setFromCamera(pointer, camera);
+
+                const targets = [];
+                mainBuilding.traverse(o => { if (o.isMesh) targets.push(o); });
+                additionsGroup.traverse(o => { if (o.isMesh) targets.push(o); });
+
+                const hit = raycaster.intersectObjects(targets, false)[0];
+                if (hit) {
+                    let g = hit.object;
+                    while (g.parent && g.parent !== mainBuilding && g.parent !== additionsGroup) {
+                        g = g.parent;
+                    }
+                    let building = null;
+                    if (g.parent === mainBuilding) building = mainBuilding;
+                    else if (g.parent === additionsGroup) building = g;
+                    if (building) {
+                        if (e.shiftKey) {
+                            toggleBuildingSelection(building);
+                        } else {
+                            selectBuildings([building]);
+                        }
+                    }
+                } else {
+                    if (!e.shiftKey) selectBuildings([]);
+                }
+                return;
+            }
+        });
+
+        renderer.domElement.addEventListener('pointermove', (e) => {
+            if (!footprintMode || !footprintStart) return;
+            const p = groundPoint(e);
+            if (!p) return;
+            if (footprintPreview) scene.remove(footprintPreview);
+            footprintPreview = new THREE.Mesh(
+                new THREE.BoxGeometry(Math.abs(p.x - footprintStart.x), 0.08, Math.abs(p.z - footprintStart.z)),
+                new THREE.MeshBasicMaterial({ color: '#3b67f2', transparent: true, opacity: 0.28 })
+            );
+            footprintPreview.position.set((p.x + footprintStart.x) / 2, 0.07, (p.z + footprintStart.z) / 2);
+            scene.add(footprintPreview);
+        });
+
+        // === EXPORT / IMPORT ===
+        $('exportBtn').onclick = () => {
+            const data = getProjectData();
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
+            a.download = 'forma-building-project.json';
+            a.click();
+            URL.revokeObjectURL(a.href);
+        };
+        $('importInput').onchange = e => {
+            const f = e.target.files[0];
+            if (!f) return;
+            const reader = new FileReader();
+            reader.onload = () => {
+                try {
+                    const data = JSON.parse(reader.result);
+                    if (f.name) {
+                        const base = f.name.replace(/\.[^.]+$/, '');
+                        updateFileName(base);
+                    }
+                    loadProjectData(data);
+                    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+                    $('analysisStatus').textContent = '已載入專案設定、標示與建物。';
+                } catch (e) { alert('無效的 JSON 檔案。');
+                    console.error(e); }
+            };
+            reader.readAsText(f);
+        };
+
+        // === RESIZE ===
+        function resize() {
+            const r = canvas.getBoundingClientRect();
+            if (r.width === 0 || r.height === 0) return;
+            camera.aspect = r.width / r.height;
+            camera.updateProjectionMatrix();
+            renderer.setSize(r.width, r.height);
+            labelRenderer.setSize(r.width, r.height);
+        }
+        const resizeObserver = new ResizeObserver(resize);
+        resizeObserver.observe(canvas);
+
+        // === ANIMATION LOOP ===
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            updateRelationVisualScale();
+            updateRelationBlink();
+            renderer.render(scene, camera);
+            labelRenderer.render(scene, camera);
+        }
+
+        // === COLLAPSIBLE ===
+        document.querySelectorAll('.section-header').forEach(header => {
+            header.addEventListener('click', () => {
+                const targetId = header.dataset.target;
+                const body = document.getElementById(targetId);
+                if (!body) return;
+                const isOpen = body.classList.toggle('open');
+                header.classList.toggle('open', isOpen);
+            });
+        });
+
+        // === INIT ===
+        setTimeout(resize, 50);
+        generateMain();
+        animate();
+
+        const hasAutoSave = loadAutoSave();
+        if (!hasAutoSave) {
+            updateFileName('3D 建築視圖');
+            $('analysisStatus').textContent = '就緒 — 可調整參數後生成建築';
+        }
+
+        updateMultiLinkUI();
+        $('deleteSelectedAnnotationBtn').disabled = true;
+        $('editAnnotationBtn').disabled = true;
+        $('deleteAllRelationsBtn').disabled = true;
+        $('deleteSelectedRelationsBtn').disabled = true;
+        $('deleteSelectedAnnotationsBtn').disabled = true;
+        $('confirmMultiLinkBtn').disabled = true;
+        $('clearLinkSelectionBtn').disabled = true;
+        $('deleteBuildingBtn').disabled = true;
+        document.querySelector('[data-target="buildingConfig"]')?.classList.add('open');
+        document.getElementById('buildingConfig')?.classList.add('open');
+
+        window.addEventListener('beforeunload', () => { autoSave(); });
+
+        console.log('Forma 已啟動，版本 6.0 — 自動聚焦點擊建築，無右下提示框');
     </script>
-  </body>
+</body>
 </html>
