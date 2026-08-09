@@ -1818,14 +1818,18 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                   <span className="text-slate-500">顯示名稱</span>
                   <span className="text-slate-200 font-medium truncate max-w-[160px]">{displayName(selectedDevice)}</span>
                 </div>
-                <div className="flex justify-between text-xs">
-                  <span className="text-slate-500">帳號</span>
-                  <span className="text-slate-300 font-mono">{selectedDevice.mqtt_user || "未設定"}</span>
-                </div>
-                <div className="flex justify-between text-xs">
-                  <span className="text-slate-500">密碼</span>
-                  <span className="text-slate-300 font-mono">{selectedDevice.mqtt_pass || "未設定"}</span>
-                </div>
+                {!selectedDevice.share_from && (
+                  <>
+                    <div className="flex justify-between text-xs">
+                      <span className="text-slate-500">帳號</span>
+                      <span className="text-slate-300 font-mono">{selectedDevice.mqtt_user || "未設定"}</span>
+                    </div>
+                    <div className="flex justify-between text-xs">
+                      <span className="text-slate-500">密碼</span>
+                      <span className="text-slate-300 font-mono">{selectedDevice.mqtt_pass || "未設定"}</span>
+                    </div>
+                  </>
+                )}
                 <div className="flex justify-between items-center text-xs">
                   <span className="text-slate-500">伺服器</span>
                   <span className="flex items-center gap-1">
@@ -2355,19 +2359,23 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
               </div>
 
               <div className="space-y-2">
-                {/* 設備帳密 */}
+                {/* 設備帳密（分享來的設備不顯示主帳號帳密，僅顯示分享者）*/}
                 {selectedDevice && (
                   <div className="bg-slate-800 rounded-xl border border-slate-700 px-4 py-3">
                     <p className="text-xs text-slate-400 mb-2">設備帳密</p>
                     <div className="space-y-1.5">
-                      <div className="flex justify-between text-xs">
-                        <span className="text-slate-500">帳號</span>
-                        <span className="text-slate-200 font-mono">{selectedDevice.mqtt_user || "未設定"}</span>
-                      </div>
-                      <div className="flex justify-between text-xs">
-                        <span className="text-slate-500">密碼</span>
-                        <span className="text-slate-200 font-mono">{selectedDevice.mqtt_pass || "未設定"}</span>
-                      </div>
+                      {!selectedDevice.share_from && (
+                        <>
+                          <div className="flex justify-between text-xs">
+                            <span className="text-slate-500">帳號</span>
+                            <span className="text-slate-200 font-mono">{selectedDevice.mqtt_user || "未設定"}</span>
+                          </div>
+                          <div className="flex justify-between text-xs">
+                            <span className="text-slate-500">密碼</span>
+                            <span className="text-slate-200 font-mono">{selectedDevice.mqtt_pass || "未設定"}</span>
+                          </div>
+                        </>
+                      )}
                       {selectedDevice.share_from && (
                         <div className="flex justify-between text-xs">
                           <span className="text-slate-500">分享者</span>
