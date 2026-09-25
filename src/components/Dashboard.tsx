@@ -47,6 +47,12 @@ const savedIcon = L.divIcon({
 });
 
 /* ─── 型別 ─── */
+interface ShareLimit {
+  startHour: number;
+  startMin: number;
+  endHour: number;
+  endMin: number;
+}
 interface DeviceCredential {
   id: string;
   device_name: string;
@@ -58,10 +64,12 @@ interface DeviceCredential {
   share_from?: string | null;
   share_count: number;
   notify?: string | null;   // 被分享者要求刪除時填入，格式："{user_id}要求刪除設備"
+  limit?: ShareLimit | null;  // NULL 代表無時段限制，全天可控制
 }
 interface SharedWithItem {
   id: string;           // device_credentials.id of the shared row
   user_id: string;      // 被分享者的 email
+  limit?: ShareLimit | null;
 }
 /* notify 來源兩路：
    "owner"  = 主帳號那筆（share_from IS NULL）的 notify 有值
@@ -123,6 +131,28 @@ function displayName(d: DeviceCredential | null): string {
     || d.device_name?.trim()
     || d.mqtt_user
     || "";
+}
+
+/* ShareLimit 工具函式：判斷目前時間是否在允許時段內 */
+function isWithinLimit(limit: ShareLimit | null | undefined): boolean {
+  if (!limit) return true; // 無設定 = 全天可控制
+  const now = new Date();
+  const curMin = now.getHours() * 60 + now.getMinutes();
+  const startMin = limit.startHour * 60 + limit.startMin;
+  const endMin = limit.endHour * 60 + limit.endMin;
+  if (startMin <= endMin) {
+    return curMin >= startMin && curMin < endMin;
+  } else {
+    // 跨日：例如 22:00 ~ 06:00
+    return curMin >= startMin || curMin < endMin;
+  }
+}
+
+/* ShareLimit 工具函式：格式化顯示文字 */
+function formatLimitLabel(limit: ShareLimit | null | undefined): string {
+  if (!limit) return "全天可控制";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(limit.startHour)}:${pad(limit.startMin)} ~ ${pad(limit.endHour)}:${pad(limit.endMin)}`;
 }
 
 const MAX_SHARES = 5;
@@ -203,6 +233,19 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const [shareEmail, setShareEmail]           = useState("");
   const [shareLoading, setShareLoading]       = useState(false);
   const [shareError, setShareError]           = useState("");
+  // 分享時段設定（分享表單）
+  const [shareUseLimit, setShareUseLimit]     = useState(false);
+  const [shareStartHour, setShareStartHour]   = useState(8);
+  const [shareStartMin,  setShareStartMin]    = useState(0);
+  const [shareEndHour,   setShareEndHour]     = useState(20);
+  const [shareEndMin,    setShareEndMin]      = useState(0);
+  // 管理分享：編輯時段
+  const [editingLimitId, setEditingLimitId]   = useState<string | null>(null);
+  const [editLimitStartH, setEditLimitStartH] = useState(8);
+  const [editLimitStartM, setEditLimitStartM] = useState(0);
+  const [editLimitEndH,   setEditLimitEndH]   = useState(20);
+  const [editLimitEndM,   setEditLimitEndM]   = useState(0);
+  const [editLimitSaving, setEditLimitSaving] = useState(false);
 
   // 管理分享（主人撤銷）
   const [showManageModal, setShowManageModal] = useState(false);
@@ -282,6 +325,9 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const isOwnDevice    = !!(selectedDevice && !selectedDevice.share_from);
   // count 本身就代表剩餘次數（每次分享 -1）
   const shareRemaining = isOwnDevice ? (selectedDevice?.share_count ?? 0) : null;
+  // 被分享者是否在允許時段內可控制
+  const isWithinAllowedTime = !!(selectedDevice && isWithinLimit(selectedDevice.limit));
+  const canControl = isOwnDevice || (!!selectedDevice?.share_from && isWithinAllowedTime);
 
   /* ── 取得設備 + 載入 MQTT 清單（同步完成，避免時序問題）── */
   const fetchDevices = useCallback(async () => {
@@ -290,7 +336,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       const [devResult, mqttResult] = await Promise.all([
         supabase
           .from("device_credentials")
-          .select("id, device_name, device_name_initial, device_name_custom, mqtt_user, mqtt_pass, server_no, share_from, count, notify")
+          .select("id, device_name, device_name_initial, device_name_custom, mqtt_user, mqtt_pass, server_no, share_from, count, notify, limit")
           .eq("user_id", email),
         supabase
           .from("mqtt_list")
@@ -333,6 +379,10 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         share_count: ownerCountMap[`${r.mqtt_user}|${r.mqtt_pass}|${r.device_name}`]
           ?? parseInt(String(r.count ?? 0), 10),
         notify: r.notify ?? null,
+        limit: (r.limit && typeof r.limit === "object" && "startHour" in r.limit)
+          ? { startHour: Number(r.limit.startHour), startMin: Number(r.limit.startMin),
+              endHour: Number(r.limit.endHour),   endMin: Number(r.limit.endMin) }
+          : null,
       }));
 
       // 4. 自動補寫 device_name_initial（只寫一次，不覆蓋既有值）
@@ -381,7 +431,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       // 路二：查詢分享出去的 row（share_from = email）的 notify（需額外查詢）
       const { data: shareRows } = await supabase
         .from("device_credentials")
-        .select("id, device_name, device_name_custom, device_name_initial, mqtt_user, mqtt_pass, notify, user_id")
+        .select("id, device_name, device_name_custom, device_name_initial, mqtt_user, mqtt_pass, notify, user_id, limit")
         .eq("share_from", email)
         .not("notify", "is", null);
       (shareRows ?? []).forEach((r: any) => {
@@ -607,6 +657,13 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       if (backPressTimer.current) clearTimeout(backPressTimer.current);
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /* ── 每 30 秒觸發重新轉譯，確保分享時段限制按鈕即時啟用/停用 ── */
+  const [, setTimeTick] = useState(0);
+  useEffect(() => {
+    const t = window.setInterval(() => setTimeTick(x => x + 1), 30 * 1000);
+    return () => window.clearInterval(t);
+  }, []);
 
   /* ── MQTT：伺服器層連線（偵測伺服器是否在線）+ 設備層 retain 訂閱（偵測設備在線）──
      架構：
@@ -1023,6 +1080,12 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const handleControl = (action: string) => {
     const device = selectedDeviceRef.current ?? selectedDevice ?? devices[0] ?? null;
     if (!device?.mqtt_user || !device?.device_name) { return; }
+    // 權限檢查：被分享者需在允許時段內才能控制
+    if (device.share_from && !isWithinLimit(device.limit)) {
+      setToastMsg(`非開放控制時段，目前僅限 ${formatLimitLabel(device.limit)} 可操作`);
+      setTimeout(() => setToastMsg(null), 3000);
+      return;
+    }
     if (selectedDeviceRef.current?.id !== device.id || selectedDevice?.id !== device.id) {
       setActiveDevice(device);
     }
@@ -1153,6 +1216,10 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         throw new Error(`${target} 本身已是此設備的擁有者，無法再分享`);
       } else {
         // 全新分享 → INSERT
+        const newLimit: ShareLimit | null = shareUseLimit
+          ? { startHour: shareStartHour, startMin: shareStartMin,
+              endHour: shareEndHour,   endMin: shareEndMin }
+          : null;
         const { error: insertErr } = await supabase
           .from("device_credentials")
           .insert({
@@ -1163,6 +1230,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
             server_no:   selectedDevice.server_no ?? null,
             share_from:  email,
             count:       currentCount - 1,
+            limit:       newLimit,
           });
         if (insertErr) {
           console.error("INSERT error:", insertErr);
@@ -1179,6 +1247,9 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       await fetchDevices();
       setShowShareModal(false);
       setShareEmail("");
+      setShareUseLimit(false);
+      setShareStartHour(8); setShareStartMin(0);
+      setShareEndHour(20);  setShareEndMin(0);
       alert(`已成功分享「${displayName(selectedDevice)}」給 ${target}`);
     } catch (err: any) {
       setShareError(err.message || "分享失敗");
@@ -1428,15 +1499,23 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     if (!selectedDevice) return;
     setManageLoading(true);
     setSharedWithList([]);
+    setEditingLimitId(null);
     setShowManageModal(true);
     try {
       const { data } = await supabase
         .from("device_credentials")
-        .select("id, user_id")
+        .select("id, user_id, limit")
         .eq("share_from", email)
         .eq("device_name", selectedDevice.device_name)
         .eq("mqtt_user", selectedDevice.mqtt_user ?? "");
-      setSharedWithList((data || []).map((r: any) => ({ id: r.id, user_id: r.user_id })));
+      setSharedWithList((data || []).map((r: any) => ({
+        id: r.id,
+        user_id: r.user_id,
+        limit: (r.limit && typeof r.limit === "object" && "startHour" in r.limit)
+          ? { startHour: Number(r.limit.startHour), startMin: Number(r.limit.startMin),
+              endHour: Number(r.limit.endHour),   endMin: Number(r.limit.endMin) }
+          : null,
+      })));
     } catch (err) { console.error(err); }
     finally { setManageLoading(false); }
   };
@@ -1478,6 +1557,36 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     } catch (err: any) {
       alert("撤銷失敗：" + (err.message || err));
     }
+  };
+
+  /* ── 主人更新某位被分享者的開放控制時段 ───────────────────── */
+  const handleUpdateLimit = async (item: SharedWithItem, useLimit: boolean, limit: ShareLimit | null) => {
+    setEditLimitSaving(true);
+    try {
+      const payload: ShareLimit | null = useLimit ? limit : null;
+      const { error } = await supabase
+        .from("device_credentials")
+        .update({ limit: payload })
+        .eq("id", item.id);
+      if (error) throw error;
+      setSharedWithList(prev => prev.map(i => i.id === item.id ? { ...i, limit: payload } : i));
+      setEditingLimitId(null);
+    } catch (err: any) {
+      alert("更新時段失敗：" + (err.message || err));
+    } finally {
+      setEditLimitSaving(false);
+    }
+  };
+
+  const openLimitEditor = (item: SharedWithItem) => {
+    if (item.limit) {
+      setEditLimitStartH(item.limit.startHour); setEditLimitStartM(item.limit.startMin);
+      setEditLimitEndH(item.limit.endHour);     setEditLimitEndM(item.limit.endMin);
+    } else {
+      setEditLimitStartH(8); setEditLimitStartM(0);
+      setEditLimitEndH(20);  setEditLimitEndM(0);
+    }
+    setEditingLimitId(item.id);
   };
 
   /* ── 被分享者：自行離開分享 ────────────────────────────────────────────
@@ -1671,10 +1780,26 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
           {/* 手動控制 */}
           <div className="mb-2">
-            <p className="text-xs text-slate-500 mb-1.5 px-0.5">
-              手動控制
-              <span className="text-slate-700 ml-1">（長按可設定）</span>
+            <p className="text-xs text-slate-500 mb-1.5 px-0.5 flex items-center justify-between">
+              <span>
+                手動控制
+                <span className="text-slate-700 ml-1">（長按可設定）</span>
+              </span>
+              {selectedDevice?.share_from && (
+                <span className={`text-[10px] px-1.5 py-0.5 rounded-full border ${
+                  isWithinAllowedTime
+                    ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
+                    : "bg-red-500/15 border-red-500/40 text-red-300"
+                }`}>
+                  {isWithinAllowedTime ? "可控制" : "時段鎖定"}
+                </span>
+              )}
             </p>
+            {selectedDevice?.share_from && !isWithinAllowedTime && (
+              <div className="text-[11px] text-red-400 bg-red-500/10 border border-red-500/30 rounded-lg px-2.5 py-1.5 mb-2">
+                目前非開放時段，僅限 {formatLimitLabel(selectedDevice.limit)} 可操作
+              </div>
+            )}
             <div className="grid grid-cols-3 gap-2">
               {([
                 { action:"open", defaultLabel:"開",
@@ -1720,7 +1845,9 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                 return (
                   <div key={action} className="relative">
                     <button
+                      disabled={!canControl}
                       onPointerDown={() => {
+                        if (!canControl) return;
                         longPressTimer.current = setTimeout(() => handleBtnLongPress(action), 600);
                       }}
                       onPointerUp={() => {
@@ -1729,23 +1856,24 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                       onPointerLeave={() => {
                         if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
                       }}
-                      onClick={() => handleBtnClick(action)}
+                      onClick={() => { if (canControl) handleBtnClick(action); }}
                       style={{
                         fontSize,
-                        transition: "transform 0.1s, background-color 0.12s",
-                        ...(hasPeriodic && !isPressed ? {
+                        transition: "transform 0.1s, background-color 0.12s, opacity 0.15s",
+                        ...(!canControl ? { opacity: 0.45, cursor: "not-allowed" } : {}),
+                        ...(hasPeriodic && !isPressed && canControl ? {
                           animation: "timerPulse 2.5s ease-in-out infinite",
                           boxShadow: isSharedSched
                             ? `0 0 12px 3px #f59e0b55, inset 0 0 16px #f59e0b18`
                             : `0 0 12px 3px ${accent}55, inset 0 0 16px ${accent}18`,
                         } : {}),
-                        ...(hasSchedule && !isPressed ? {
+                        ...(hasSchedule && !isPressed && canControl ? {
                           animation: "schedPulse 4s ease-in-out infinite",
                           boxShadow: isSharedSched
                             ? `0 0 10px 2px #f59e0b44, inset 0 0 14px #f59e0b14`
                             : `0 0 10px 2px #818cf844, inset 0 0 14px #818cf814`,
                         } : {}),
-                        ...(hasRange && !isPressed ? {
+                        ...(hasRange && !isPressed && canControl ? {
                           animation: "schedPulse 4s ease-in-out infinite",
                           boxShadow: isSharedSched
                             ? `0 0 10px 2px #f59e0b44, inset 0 0 14px #f59e0b14`
@@ -1757,13 +1885,21 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                         flex flex-col items-center justify-center text-center
                         leading-tight px-1 break-words min-h-[68px] select-none
                         relative overflow-hidden
-                        ${isPressed
+                        ${isPressed && canControl
                           ? `${pressedColor} scale-95 shadow-lg ${glowColor}`
-                          : `${baseColor} bg-slate-900 active:scale-95`}
+                          : canControl
+                            ? `${baseColor} bg-slate-900 active:scale-95`
+                            : `${baseColor} bg-slate-900 grayscale`}
                       `}
                     >
                       {/* 主文字 */}
-                      <span>{isPressed ? "✓" : label}</span>
+                      <span>
+                        {!canControl
+                          ? "🔒"
+                          : isPressed
+                            ? "✓"
+                            : label}
+                      </span>
                       {/* 副文字：分享設備顯示「主機」前綴，提示為 owner 在 ESP32 上設定的排程 */}
                       {!isPressed && hasPeriodic && (
                         <span className={`text-[9px] font-mono leading-none mt-0.5 ${
@@ -1845,10 +1981,21 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                   </span>
                 </div>
                 {selectedDevice.share_from && (
-                  <div className="flex justify-between text-xs">
-                    <span className="text-slate-500">分享者</span>
-                    <span className="text-yellow-500 truncate max-w-[160px]">{selectedDevice.share_from}</span>
-                  </div>
+                  <>
+                    <div className="flex justify-between text-xs">
+                      <span className="text-slate-500">分享者</span>
+                      <span className="text-yellow-500 truncate max-w-[160px]">{selectedDevice.share_from}</span>
+                    </div>
+                    <div className="flex justify-between items-center text-xs">
+                      <span className="text-slate-500">開放時段</span>
+                      <span className={`truncate max-w-[160px] ${
+                        isWithinAllowedTime ? "text-emerald-400" : "text-red-400"
+                      }`}>
+                        {formatLimitLabel(selectedDevice.limit)}
+                        {isWithinAllowedTime ? " ✅" : " 🔒"}
+                      </span>
+                    </div>
+                  </>
                 )}
               </div>
             </div>
@@ -2039,6 +2186,66 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                 className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white text-sm focus:outline-none focus:border-blue-500 mb-3"
                 autoFocus
               />
+              {/* 開放控制時段設定 */}
+              <div className="bg-slate-800/60 border border-slate-700 rounded-xl p-3 mb-3">
+                <label className="flex items-center justify-between mb-2 cursor-pointer">
+                  <div>
+                    <p className="text-sm text-slate-200 font-medium">設定開放控制時段</p>
+                    <p className="text-[11px] text-slate-500">勾啟後，被分享者僅限指定時段內可控制開關</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShareUseLimit(v => !v)}
+                    className={`w-11 h-6 rounded-full border transition-colors relative ${
+                      shareUseLimit ? "bg-blue-600 border-blue-500" : "bg-slate-700 border-slate-600"
+                    }`}
+                  >
+                    <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all ${
+                      shareUseLimit ? "left-[22px]" : "left-0.5"
+                    }`} />
+                  </button>
+                </label>
+                {shareUseLimit && (() => {
+                  const HourSelect = ({ value, onChange }: { value: number; onChange: (v: number) => void }) => (
+                    <select value={value} onChange={e => onChange(parseInt(e.target.value))}
+                      className="flex-1 bg-slate-900 border border-slate-600 rounded-lg px-1 py-1.5 text-white text-xs focus:outline-none focus:border-blue-500 appearance-none text-center">
+                      {Array.from({length:24},(_,i)=>i).map(h=>(
+                        <option key={h} value={h}>{String(h).padStart(2,"0")}</option>
+                      ))}
+                    </select>
+                  );
+                  const MinSelect = ({ value, onChange }: { value: number; onChange: (v: number) => void }) => (
+                    <select value={value} onChange={e => onChange(parseInt(e.target.value))}
+                      className="flex-1 bg-slate-900 border border-slate-600 rounded-lg px-1 py-1.5 text-white text-xs focus:outline-none focus:border-blue-500 appearance-none text-center">
+                      {Array.from({length:60},(_,i)=>i).map(m=>(
+                        <option key={m} value={m}>{String(m).padStart(2,"0")}</option>
+                      ))}
+                    </select>
+                  );
+                  return (
+                    <div className="space-y-2 pt-1 border-t border-slate-700 mt-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-slate-400 w-10 flex-shrink-0">開始</span>
+                        <HourSelect value={shareStartHour} onChange={setShareStartHour} />
+                        <span className="text-slate-400 font-bold text-sm">:</span>
+                        <MinSelect  value={shareStartMin}  onChange={setShareStartMin}  />
+                        <span className="text-slate-300 text-xs font-mono ml-1">
+                          {String(shareStartHour).padStart(2,"0")}:{String(shareStartMin).padStart(2,"0")}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-slate-400 w-10 flex-shrink-0">結束</span>
+                        <HourSelect value={shareEndHour} onChange={setShareEndHour} />
+                        <span className="text-slate-400 font-bold text-sm">:</span>
+                        <MinSelect  value={shareEndMin}  onChange={setShareEndMin}  />
+                        <span className="text-slate-300 text-xs font-mono ml-1">
+                          {String(shareEndHour).padStart(2,"0")}:{String(shareEndMin).padStart(2,"0")}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
               <div className="flex gap-2">
                 <button onClick={() => setShowShareModal(false)}
                   className="flex-1 py-2.5 rounded-xl border border-slate-600 text-slate-300 text-sm font-medium active:bg-slate-800">
@@ -2152,16 +2359,99 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                 <div className="space-y-2 mb-3 max-h-60 overflow-y-auto">
                   {sharedWithList.map((item) => (
                     <div key={item.id}
-                      className="flex items-center justify-between px-3 py-2.5 bg-slate-800 rounded-xl border border-slate-700">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <div className="w-2 h-2 rounded-full bg-yellow-500 flex-shrink-0" />
-                        <span className="text-sm text-slate-200 truncate">{item.user_id}</span>
+                      className="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden">
+                      <div className="flex items-center justify-between px-3 py-2.5">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <div className="w-2 h-2 rounded-full bg-yellow-500 flex-shrink-0" />
+                          <span className="text-sm text-slate-200 truncate">{item.user_id}</span>
+                        </div>
+                        <div className="flex items-center gap-1.5 flex-shrink-0 ml-2">
+                          <button
+                            onClick={() => openLimitEditor(item)}
+                            className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium border ${
+                              item.limit
+                                ? "bg-amber-500/20 border-amber-500/40 text-amber-300 active:bg-amber-500/30"
+                                : "bg-slate-700 border-slate-600 text-slate-400 active:bg-slate-600"
+                            }`}>
+                            <Clock className="w-3 h-3" />
+                            {item.limit ? "時段" : "無限"}
+                          </button>
+                          <button
+                            onClick={() => handleRevokeShare(item)}
+                            className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-red-500/20 border border-red-500/40 text-red-400 text-xs font-medium active:bg-red-500/40">
+                            <UserMinus className="w-3 h-3" />撤銷
+                          </button>
+                        </div>
                       </div>
-                      <button
-                        onClick={() => handleRevokeShare(item)}
-                        className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-red-500/20 border border-red-500/40 text-red-400 text-xs font-medium active:bg-red-500/40 flex-shrink-0 ml-2">
-                        <UserMinus className="w-3 h-3" />撤銷
-                      </button>
+                      <div className="px-3 pb-2">
+                        <p className={`text-[11px] ${item.limit ? "text-amber-300/80" : "text-slate-500"}`}>
+                          開放時段：{formatLimitLabel(item.limit)}
+                        </p>
+                      </div>
+                      {/* 編輯時段展開 */}
+                      {editingLimitId === item.id && (() => {
+                        const HourSelect = ({ value, onChange }: { value: number; onChange: (v: number) => void }) => (
+                          <select value={value} onChange={e => onChange(parseInt(e.target.value))}
+                            className="flex-1 bg-slate-900 border border-slate-600 rounded-lg px-1 py-1.5 text-white text-xs focus:outline-none focus:border-amber-500 appearance-none text-center">
+                            {Array.from({length:24},(_,i)=>i).map(h=>(
+                              <option key={h} value={h}>{String(h).padStart(2,"0")}</option>
+                            ))}
+                          </select>
+                        );
+                        const MinSelect = ({ value, onChange }: { value: number; onChange: (v: number) => void }) => (
+                          <select value={value} onChange={e => onChange(parseInt(e.target.value))}
+                            className="flex-1 bg-slate-900 border border-slate-600 rounded-lg px-1 py-1.5 text-white text-xs focus:outline-none focus:border-amber-500 appearance-none text-center">
+                            {Array.from({length:60},(_,i)=>i).map(m=>(
+                              <option key={m} value={m}>{String(m).padStart(2,"0")}</option>
+                            ))}
+                          </select>
+                        );
+                        const useLimit = !(
+                          editLimitStartH === 0 && editLimitStartM === 0 &&
+                          editLimitEndH === 0 && editLimitEndM === 0 &&
+                          !item.limit
+                        );
+                        return (
+                          <div className="px-3 pb-3 border-t border-slate-700 pt-2 space-y-2">
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs text-slate-400 w-10 flex-shrink-0">開始</span>
+                              <HourSelect value={editLimitStartH} onChange={setEditLimitStartH} />
+                              <span className="text-slate-400 font-bold text-sm">:</span>
+                              <MinSelect  value={editLimitStartM} onChange={setEditLimitStartM} />
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs text-slate-400 w-10 flex-shrink-0">結束</span>
+                              <HourSelect value={editLimitEndH} onChange={setEditLimitEndH} />
+                              <span className="text-slate-400 font-bold text-sm">:</span>
+                              <MinSelect  value={editLimitEndM} onChange={setEditLimitEndM} />
+                            </div>
+                            <div className="flex gap-2 pt-1">
+                              <button
+                                onClick={() => setEditingLimitId(null)}
+                                className="flex-1 py-1.5 rounded-lg border border-slate-600 text-slate-300 text-xs active:bg-slate-700">
+                                取消
+                              </button>
+                              <button
+                                onClick={() => handleUpdateLimit(item, false, null)}
+                                disabled={editLimitSaving}
+                                className="flex-1 py-1.5 rounded-lg border border-slate-500 text-slate-200 text-xs active:bg-slate-700 disabled:opacity-40">
+                                改為全天
+                              </button>
+                              <button
+                                onClick={() => handleUpdateLimit(item, true, {
+                                  startHour: editLimitStartH, startMin: editLimitStartM,
+                                  endHour: editLimitEndH, endMin: editLimitEndM,
+                                })}
+                                disabled={editLimitSaving}
+                                className="flex-1 py-1.5 rounded-lg bg-amber-500 text-slate-900 text-xs font-bold active:bg-amber-400 disabled:opacity-40 flex items-center justify-center gap-1">
+                                {editLimitSaving
+                                  ? <><div className="w-3 h-3 border-2 border-slate-900 border-t-transparent rounded-full animate-spin" />儲存中</>
+                                  : "儲存"}
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })()}
                     </div>
                   ))}
                 </div>
@@ -2377,10 +2667,21 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                         </>
                       )}
                       {selectedDevice.share_from && (
-                        <div className="flex justify-between text-xs">
-                          <span className="text-slate-500">分享者</span>
-                          <span className="text-yellow-400 truncate max-w-[160px]">{selectedDevice.share_from}</span>
-                        </div>
+                        <>
+                          <div className="flex justify-between text-xs">
+                            <span className="text-slate-500">分享者</span>
+                            <span className="text-yellow-400 truncate max-w-[160px]">{selectedDevice.share_from}</span>
+                          </div>
+                          <div className="flex justify-between items-center text-xs">
+                            <span className="text-slate-500">開放時段</span>
+                            <span className={`truncate max-w-[160px] ${
+                              isWithinAllowedTime ? "text-emerald-400" : "text-red-400"
+                            }`}>
+                              {formatLimitLabel(selectedDevice.limit)}
+                              {isWithinAllowedTime ? " ✅" : " 🔒"}
+                            </span>
+                          </div>
+                        </>
                       )}
                     </div>
                   </div>
