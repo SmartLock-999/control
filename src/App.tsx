@@ -9,13 +9,18 @@ interface BeforeInstallPromptEvent extends Event {
   userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }>;
 }
 
-class ErrorBoundary extends React.Component<
-  { children: React.ReactNode },
-  { error: Error | null }
-> {
-  state: { error: Error | null } = { error: null };
+type EBProps = { children: React.ReactNode };
+type EBState = { error: Error | null };
+class ErrorBoundary extends React.Component<EBProps, EBState> {
+  readonly props: EBProps;
+  state: EBState = { error: null };
 
-  static getDerivedStateFromError(error: Error) {
+  constructor(props: EBProps) {
+    super(props);
+    this.props = props;
+  }
+
+  static getDerivedStateFromError(error: Error): EBState {
     return { error };
   }
 
