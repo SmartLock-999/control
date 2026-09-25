@@ -1105,6 +1105,29 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     const topic = `device/${device.mqtt_user}/${device.device_name}/command`;
     const payload = JSON.stringify({ action, pin, ts: Math.floor(Date.now() / 1000) });
     client.publish(topic, payload, { qos: 1 });
+    // 紀錄手動控制 log 到 control_logs（source=manual）
+    void (async () => {
+      try {
+        const { data: userData } = await supabase.auth.getUser();
+        const authUserId = userData?.user?.id;
+        if (!authUserId) return;
+        const deviceCode = `${device.mqtt_user}/${device.device_name}`;
+        const { error: logErr } = await supabase
+          .from("control_logs")
+          .insert({
+            user_id: authUserId,
+            source: "manual",
+            device_code: deviceCode,
+            action: action,
+            pin: pin,
+            success: true,
+            error: null,
+          });
+        if (logErr) console.warn("[control_logs] 手動控制紀錄失敗:", logErr.message);
+      } catch (e) {
+        console.warn("[control_logs] 手動控制紀錄例外:", e);
+      }
+    })();
     // 按壓動畫
     setTriggeredAction(action);
     setTimeout(() => setTriggeredAction(null), 1200);
