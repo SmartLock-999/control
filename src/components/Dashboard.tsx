@@ -7,7 +7,7 @@ import {
 import L from "leaflet";
 import {
   Crosshair, ChevronLeft, ChevronRight,
-  LogOut, Settings, Share2, Trash2, X, MapPin, UserMinus, Users, Pencil, Clock, Timer,
+  LogOut, Settings, Share2, Trash2, X, MapPin, UserMinus, Users, Pencil, Clock, Timer, History, ChevronDown, ChevronUp,
 } from "lucide-react";
 import { supabase } from "../utils/supabaseClient";
 import mqtt from "mqtt";
@@ -70,6 +70,15 @@ interface SharedWithItem {
   id: string;           // device_credentials.id of the shared row
   user_id: string;      // 被分享者的 email
   limit?: ShareLimit | null;
+}
+interface SharedControlLogRow {
+  created_at: string;
+  user_email: string;
+  user_id: string;
+  action: string;
+  pin: string;
+  success: boolean;
+  error: string | null;
 }
 /* notify 來源兩路：
    "owner"  = 主帳號那筆（share_from IS NULL）的 notify 有值
@@ -251,6 +260,10 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const [showManageModal, setShowManageModal] = useState(false);
   const [sharedWithList, setSharedWithList]   = useState<SharedWithItem[]>([]);
   const [manageLoading, setManageLoading]     = useState(false);
+  // 管理分享：檢視分享使用者的觸發 log
+  const [expandedShareLogId, setExpandedShareLogId] = useState<string | null>(null);
+  const [shareLogsMap, setShareLogsMap]             = useState<Record<string, SharedControlLogRow[]>>({});
+  const [shareLogsLoadingMap, setShareLogsLoadingMap] = useState<Record<string, boolean>>({});
 
   // 離開分享（被分享者）
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
@@ -1612,6 +1625,61 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     setEditingLimitId(item.id);
   };
 
+  /* ── 主人檢視某位被分享者的控制觸發 log ───────────────────── */
+  const loadSharedControlLogs = async (item: SharedWithItem) => {
+    if (!selectedDevice) return;
+    setShareLogsLoadingMap(prev => ({ ...prev, [item.id]: true }));
+    try {
+      const { data, error } = await supabase.rpc("get_shared_device_control_logs_rows", {
+        p_share_from_email: email,
+        p_mqtt_user:        selectedDevice.mqtt_user ?? "",
+        p_mqtt_pass:        selectedDevice.mqtt_pass ?? "",
+        p_device_name:      selectedDevice.device_name ?? "",
+        p_limit:            500,
+      });
+      if (error) {
+        console.warn("[loadSharedControlLogs] RPC error:", error.message);
+        setShareLogsMap(prev => ({ ...prev, [item.id]: [] }));
+      } else {
+        const rows: SharedControlLogRow[] = Array.isArray(data)
+          ? (data as any[]).map(r => ({
+              created_at: r.created_at,
+              user_email: r.user_email,
+              user_id:    r.user_id,
+              action:     r.action,
+              pin:        r.pin,
+              success:    r.success,
+              error:      r.error ?? null,
+            }))
+          : [];
+        const filtered = rows.filter(r => r.user_email.toLowerCase() === item.user_id.toLowerCase());
+        setShareLogsMap(prev => ({ ...prev, [item.id]: filtered }));
+      }
+    } catch (e) {
+      console.warn("[loadSharedControlLogs] exception:", e);
+      setShareLogsMap(prev => ({ ...prev, [item.id]: [] }));
+    } finally {
+      setShareLogsLoadingMap(prev => ({ ...prev, [item.id]: false }));
+    }
+  };
+  const toggleShareLog = (item: SharedWithItem) => {
+    if (expandedShareLogId === item.id) {
+      setExpandedShareLogId(null);
+    } else {
+      setExpandedShareLogId(item.id);
+      if (!shareLogsMap[item.id] || shareLogsMap[item.id].length === 0) {
+        void loadSharedControlLogs(item);
+      }
+    }
+  };
+  const formatLogTime = (isoStr: string): string => {
+    try {
+      const d = new Date(isoStr);
+      const pad = (n: number) => String(n).padStart(2, "0");
+      return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    } catch { return isoStr; }
+  };
+
   /* ── 被分享者：自行離開分享 ────────────────────────────────────────────
      雙路寫入 notify，不直接刪除：
      路一：RPC 寫主帳號 owner row（繞過 RLS）
@@ -2379,7 +2447,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                   <p className="text-slate-500 text-sm">尚未分享給任何人</p>
                 </div>
               ) : (
-                <div className="space-y-2 mb-3 max-h-60 overflow-y-auto">
+                <div className="space-y-2 mb-3 max-h-[70vh] overflow-y-auto">
                   {sharedWithList.map((item) => (
                     <div key={item.id}
                       className="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden">
@@ -2389,6 +2457,20 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                           <span className="text-sm text-slate-200 truncate">{item.user_id}</span>
                         </div>
                         <div className="flex items-center gap-1.5 flex-shrink-0 ml-2">
+                          <button
+                            onClick={() => toggleShareLog(item)}
+                            className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium border ${
+                              expandedShareLogId === item.id
+                                ? "bg-blue-500/20 border-blue-500/40 text-blue-300 active:bg-blue-500/30"
+                                : "bg-slate-700 border-slate-600 text-slate-400 active:bg-slate-600"
+                            }`}>
+                            <History className="w-3 h-3" />
+                            {expandedShareLogId === item.id ? (
+                              <ChevronUp className="w-3 h-3" />
+                            ) : (
+                              <ChevronDown className="w-3 h-3" />
+                            )}
+                          </button>
                           <button
                             onClick={() => openLimitEditor(item)}
                             className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium border ${
@@ -2411,6 +2493,63 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                           開放時段：{formatLimitLabel(item.limit)}
                         </p>
                       </div>
+
+                      {/* 分享使用者控制 Log 展開區 */}
+                      {expandedShareLogId === item.id && (() => {
+                        const logs = shareLogsMap[item.id];
+                        const loading = shareLogsLoadingMap[item.id];
+                        return (
+                          <div className="border-t border-slate-700 bg-slate-900/50">
+                            {loading ? (
+                              <div className="flex justify-center py-5">
+                                <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
+                              </div>
+                            ) : !logs || logs.length === 0 ? (
+                              <div className="px-3 py-4 text-center">
+                                <p className="text-xs text-slate-500">尚無控制觸發記錄</p>
+                              </div>
+                            ) : (
+                              <div className="max-h-64 overflow-y-auto">
+                                <div className="px-3 py-2 text-[11px] text-slate-500 border-b border-slate-800 flex justify-between">
+                                  <span>共 {logs.length} 筆記錄</span>
+                                  <span>最新在上</span>
+                                </div>
+                                <div className="divide-y divide-slate-800/70">
+                                  {logs.map((log, idx) => {
+                                    const defaultLabels: Record<string, string> = { open: "開", stop: "停", down: "關" };
+                                    return (
+                                      <div key={idx} className="px-3 py-2 flex items-start gap-2">
+                                        <div className={`mt-0.5 w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                                          log.success ? "bg-green-500" : "bg-red-500"
+                                        }`} />
+                                        <div className="flex-1 min-w-0">
+                                          <div className="flex items-center justify-between gap-2">
+                                            <span className={`text-xs font-semibold ${
+                                              log.success ? "text-slate-200" : "text-red-400"
+                                            }`}>
+                                              {defaultLabels[log.action] || log.action}
+                                              {log.pin && <span className="text-slate-500 font-normal ml-1">({log.pin})</span>}
+                                            </span>
+                                            <span className="text-[10px] text-slate-500 flex-shrink-0">
+                                              {formatLogTime(log.created_at)}
+                                            </span>
+                                          </div>
+                                          {log.error && (
+                                            <p className="mt-0.5 text-[10px] text-red-400/80 truncate">
+                                              錯誤：{log.error}
+                                            </p>
+                                          )}
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
+
                       {/* 編輯時段展開 */}
                       {editingLimitId === item.id && (() => {
                         const HourSelect = ({ value, onChange }: { value: number; onChange: (v: number) => void }) => (
