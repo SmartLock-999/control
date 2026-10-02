@@ -173,7 +173,7 @@ const MQTT_FALLBACK: Record<number, string> = {}; // DB 載入前暫為空
 
 /** 依 device 的 server_no 從傳入的 mqttList 取得 Broker URL；找不到時回傳 null
  *  mqtt_list.url 可以是完整 URL 或純 hostname，本函式統一補齊格式：
- *    hostname only  → wss://<hostname>:8884/mqtt
+ *    hostname only  → wss://<hostname>:8084/mqtt  （EMQX Serverless WSS 埠）
  *    已有 protocol  → 原樣使用                                          */
 function getBrokerUrl(
   device: DeviceCredential | null,
@@ -187,8 +187,8 @@ function getBrokerUrl(
   if (!raw) return null;
   // 已有 protocol（wss:// 或 ws://）→ 直接使用
   if (/^wss?:\/\//i.test(raw)) return raw;
-  // 純 hostname → 補齊成完整 WSS URL
-  return `wss://${raw}:8884/mqtt`;
+  // 純 hostname → 補齊成完整 WSS URL（EMQX WSS 預設埠 8084）
+  return `wss://${raw}:8084/mqtt`;
 }
 
 export default function Dashboard({ email, onLogout }: { email: string; onLogout: () => void }) {
@@ -719,13 +719,24 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         reconnectPeriod: 5000,
         keepalive: 30,
         clean: true,
+        connectTimeout: 15 * 1000,
       });
 
       // 儲存 client 供 handleControl 發布指令使用
       mqttClientsRef.current[no] = client;
 
+      // 初始連線 watchdog（10 秒）：若首次連線逾時，標示為 Offline 並記錄提示
+      const initWatchdog = window.setTimeout(() => {
+        if (!isActive) return;
+        setServerStatusMap((prev) => {
+          if (prev[no] === "Online") return prev;
+          return { ...prev, [no]: "Offline" };
+        });
+      }, 10 * 1000);
+
       client.on("connect", () => {
         if (!isActive) return;
+        window.clearTimeout(initWatchdog);
         setServerStatusMap((prev) => ({ ...prev, [no]: "Online" }));
 
         // status 訂閱（逐設備 row，含 share row）
@@ -975,6 +986,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
       cleanups.push(() => {
         isActive = false;
+        window.clearTimeout(initWatchdog);
         delete mqttClientsRef.current[no];
         try { client.end(true); } catch {}
       });
@@ -1116,8 +1128,9 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     }
     const pin = action === "open" ? "D4" : action === "stop" ? "D18" : "D19";
     const topic = `device/${device.mqtt_user}/${device.device_name}/command`;
-    const payload = JSON.stringify({ action, pin, ts: Math.floor(Date.now() / 1000) });
-    client.publish(topic, payload, { qos: 1 });
+    const payloadObj: Record<string, unknown> = { action, pin, ts: Math.floor(Date.now() / 1000) };
+    if (action === "open") payloadObj.duration = 1000;
+    client.publish(topic, JSON.stringify(payloadObj), { qos: 1 });
     // 紀錄手動控制 log 到 control_logs（source=manual）
     void (async () => {
       try {
