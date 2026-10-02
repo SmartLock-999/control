@@ -171,10 +171,43 @@ const DEFAULT_CENTER: [number, number] = [22.6273, 120.3014];
 // mqtt_list 是全局設定表，不需以 user_id 篩選
 const MQTT_FALLBACK: Record<number, string> = {}; // DB 載入前暫為空
 
-/** 依 device 的 server_no 從傳入的 mqttList 取得 Broker URL；找不到時回傳 null
- *  mqtt_list.url 可以是完整 URL 或純 hostname，本函式統一補齊格式：
- *    hostname only  → wss://<hostname>:8084/mqtt  （EMQX Serverless WSS 埠）
- *    已有 protocol  → 原樣使用                                          */
+// 雙埠快取：每個 server_no 上次成功連線的埠（8084 EMQX / 8884 HiveMQ），下次優先用
+const LAST_SUCCESS_PORT_KEY = "mqtt_last_success_port";
+function readLastPortMap(): Record<number, number> {
+  try { return JSON.parse(localStorage.getItem(LAST_SUCCESS_PORT_KEY) || "{}") || {}; }
+  catch { return {}; }
+}
+function writeLastPort(serverNo: number, port: number) {
+  try {
+    const m = readLastPortMap();
+    m[serverNo] = port;
+    localStorage.setItem(LAST_SUCCESS_PORT_KEY, JSON.stringify(m));
+  } catch {}
+}
+
+/** 解析 mqtt_list.url 並回傳「候選 URL 陣列」：
+ *    ① 已有 wss?:// protocol        → 單一 URL（使用者明確指定，不自動切換）
+ *    ② 只有 hostname (無 protocol)   → 兩個候選，優先順序：
+ *         - 上次成功的埠（若存在）排第一
+ *         - 其次 8084 (EMQX Serverless) 與 8884 (HiveMQ / 一般商用)
+ *       連線失敗時由 MQTT 層自動輪換                                 */
+function getBrokerCandidates(
+  serverNo: number,
+  mqttList: Record<number, string>
+): string[] | null {
+  const raw = mqttList[serverNo];
+  if (!raw) return null;
+  if (/^wss?:\/\//i.test(raw)) return [raw]; // 完整 URL，不切換
+  // hostname-only → 依上次成功 + 兩種標準埠產生候選
+  const lastMap = readLastPortMap();
+  const lastPort = lastMap[serverNo];
+  const ports: number[] = lastPort === 8084 || lastPort === 8884
+    ? [lastPort, lastPort === 8084 ? 8884 : 8084]
+    : [8084, 8884];
+  return ports.map((p) => `wss://${raw}:${p}/mqtt`);
+}
+
+/** 舊 API 保留（handleControl 仍使用），預設回傳第一候選 URL */
 function getBrokerUrl(
   device: DeviceCredential | null,
   mqttList: Record<number, string>
@@ -183,12 +216,8 @@ function getBrokerUrl(
   const no: number = (device.server_no != null && device.server_no > 0)
     ? device.server_no
     : 1;
-  const raw = mqttList[no];
-  if (!raw) return null;
-  // 已有 protocol（wss:// 或 ws://）→ 直接使用
-  if (/^wss?:\/\//i.test(raw)) return raw;
-  // 純 hostname → 補齊成完整 WSS URL（EMQX WSS 預設埠 8084）
-  return `wss://${raw}:8084/mqtt`;
+  const list = getBrokerCandidates(no, mqttList);
+  return list && list.length ? list[0] : null;
 }
 
 export default function Dashboard({ email, onLogout }: { email: string; onLogout: () => void }) {
@@ -682,9 +711,15 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
      架構：
        ① 每個 server_no 建立一條長連線（用 owner 設備憑證），監聽 connect/close 判斷伺服器狀態
        ② 連上後訂閱所有屬於該伺服器的設備 status topic（retain），即時判斷設備在線
+       ③ 雙埠自動切換（hostname-only 才啟動）：
+            - 先試第一候選（上次成功的埠優先，其次 8084 EMQX）
+            - 10 秒未連上或 error/close 時自動切換到 8884 HiveMQ，反之亦然
+            - 連上成功後寫入 localStorage，下次優先使用該埠
+            - 已明確指定完整 wss?://...URL 時，不做自動切換
      優點：
        ● 伺服器狀態和設備狀態分開顯示
        ● 不需要輪詢，retain 訊息連上就立刻知道
+       ● HiveMQ(8884) 與 EMQX(8084) 自動適配，免手動改設定
   ── */
   useEffect(() => {
     if (!devices.length || !Object.keys(mqttList).length) return;
@@ -703,292 +738,308 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
     Object.entries(serverGroups).forEach(([noStr, devs]) => {
       const no = Number(noStr);
-      const brokerUrl = getBrokerUrl(devs[0], mqttList);
-      if (!brokerUrl) return;
+      const candidates = getBrokerCandidates(no, mqttList);
+      if (!candidates || !candidates.length) return;
+      const autoSwap = candidates.length > 1; // 只有 hostname-only 才有多個候選
 
       // 用第一台 owner 設備憑證建連線（分享設備用 owner 憑證）
       const cred = devs.find((d) => !d.share_from) ?? devs[0];
       let isActive = true;
+      let candIdx = 0;
+      let client: mqtt.MqttClient | null = null;
+      let initWatchdog: number | null = null;
+      let swapTimer: number | null = null;
+
+      // 從連線 URL 解析 WSS 埠號（供成功後寫入 last_success_port）
+      const parsePortFromUrl = (url: string): number | null => {
+        try {
+          const u = new URL(url);
+          return u.port ? parseInt(u.port, 10) : (u.protocol === "wss:" ? 443 : 80);
+        } catch { return null; }
+      };
+
+      const clearAllTimers = () => {
+        if (initWatchdog) { window.clearTimeout(initWatchdog); initWatchdog = null; }
+        if (swapTimer)    { window.clearTimeout(swapTimer);    swapTimer = null; }
+      };
 
       setServerStatusMap((prev) => ({ ...prev, [no]: "Connecting" }));
 
-      const client = mqtt.connect(brokerUrl, {
-        username: cred.mqtt_user!,
-        password: cred.mqtt_pass!,
-        clientId: `web_srv${no}_${Math.random().toString(36).slice(2, 8)}`,
-        reconnectPeriod: 5000,
-        keepalive: 30,
-        clean: true,
-        connectTimeout: 15 * 1000,
-      });
-
-      // 儲存 client 供 handleControl 發布指令使用
-      mqttClientsRef.current[no] = client;
-
-      // 初始連線 watchdog（10 秒）：若首次連線逾時，標示為 Offline 並記錄提示
-      const initWatchdog = window.setTimeout(() => {
+      const connectOnce = () => {
         if (!isActive) return;
-        setServerStatusMap((prev) => {
-          if (prev[no] === "Online") return prev;
-          return { ...prev, [no]: "Offline" };
+        const url = candidates[candIdx % candidates.length];
+        clearAllTimers();
+
+        if (client) {
+          try { client.end(true); } catch {}
+          client = null;
+        }
+
+        client = mqtt.connect(url, {
+          username: cred.mqtt_user!,
+          password: cred.mqtt_pass!,
+          clientId: `web_srv${no}_${Math.random().toString(36).slice(2, 8)}`,
+          reconnectPeriod: autoSwap ? 0 : 5000, // 自動切換模式下關閉 mqtt.js 內建重連，改由 swap 控制
+          keepalive: 30,
+          clean: true,
+          connectTimeout: 15 * 1000,
         });
-      }, 10 * 1000);
 
-      client.on("connect", () => {
-        if (!isActive) return;
-        window.clearTimeout(initWatchdog);
-        setServerStatusMap((prev) => ({ ...prev, [no]: "Online" }));
+        mqttClientsRef.current[no] = client;
 
-        // status 訂閱（逐設備 row，含 share row）
-        const statusTopics = devs
-          .filter((d) => d.mqtt_user && d.device_name)
-          .map((d) => `device/${d.mqtt_user}/${d.device_name}/status`);
-
-        // cfg_report 訂閱：ESP32 主動回報設定時使用，依實體設備去重
-        const cfgReportTopics: string[] = [];
-        const seenCfg = new Set<string>();
-        devs.filter(d => d.mqtt_user && d.device_name).forEach(d => {
-          const k = `${d.mqtt_user}|${d.device_name}`;
-          if (!seenCfg.has(k)) {
-            seenCfg.add(k);
-            cfgReportTopics.push(`device/${d.mqtt_user}/${d.device_name}/cfg_report`);
+        // 初始連線 watchdog（10 秒）：未在期限內連上 → 自動切換或標示 Offline
+        initWatchdog = window.setTimeout(() => {
+          if (!isActive) return;
+          if (autoSwap) {
+            scheduleSwap("watchdog 10s timeout");
+          } else {
+            setServerStatusMap((prev) => prev[no] === "Online" ? prev : { ...prev, [no]: "Offline" });
           }
-        });
+        }, 10 * 1000);
 
-        const allTopics = [...statusTopics, ...cfgReportTopics];
-        if (allTopics.length) client.subscribe(allTopics, { qos: 0 });
+        client.on("connect", () => {
+          if (!isActive || !client) return;
+          clearAllTimers();
+          const port = parsePortFromUrl(url);
+          if (port) writeLastPort(no, port);
+          setServerStatusMap((prev) => ({ ...prev, [no]: "Online" }));
 
-        // 連線後查詢 ESP32 目前的循環 + 排程設定
-        // 依實體設備（mqtt_user + device_name）去重，owner / share row 共用同一台設備
-        setTimeout(() => {
-          const seen = new Set<string>();
+          // status 訂閱（逐設備 row，含 share row）
+          const statusTopics = devs
+            .filter((d) => d.mqtt_user && d.device_name)
+            .map((d) => `device/${d.mqtt_user}/${d.device_name}/status`);
+
+          const cfgReportTopics: string[] = [];
+          const seenCfg = new Set<string>();
           devs.filter(d => d.mqtt_user && d.device_name).forEach(d => {
-            const key = `${d.mqtt_user}|${d.device_name}`;
-            if (seen.has(key)) return;
-            seen.add(key);
-            const cfgTopic = `device/${d.mqtt_user}/${d.device_name}/config`;
-            client.publish(cfgTopic, JSON.stringify({ action: "get_periodic" }), { qos: 1 });
-            client.publish(cfgTopic, JSON.stringify({ action: "get_schedule" }), { qos: 1 });
-            client.publish(cfgTopic, JSON.stringify({ action: "get_range"    }), { qos: 1 });
-          });
-        }, 1500);
-      });
-
-      client.on("message", (topic, payload) => {
-        if (!isActive) return;
-        const text = new TextDecoder().decode(payload).trim();
-        let parsed: any = null;
-        try { parsed = JSON.parse(text); } catch {}
-
-        // ── ESP32 回報循環設定（periodic_cfg）→ 同步 state + localStorage ──
-        if (parsed?.type === "periodic_cfg" && Array.isArray(parsed.periodics)) {
-          // 找到所有符合此 topic 的設備（owner row + share row 都要）
-          const matchedDevs = devs.filter(d =>
-            d.mqtt_user && d.device_name &&
-            topic.startsWith(`device/${d.mqtt_user}/${d.device_name}/`)
-          );
-          if (!matchedDevs.length) return;
-
-          // localStorage 以 owner row 為基底（share row 不寫 localStorage）
-          const ownerDev = matchedDevs.find(d => !d.share_from);
-          let stored: Record<string, TimerCfg> = {};
-          if (ownerDev) {
-            try { stored = JSON.parse(localStorage.getItem(`btnTimers_${ownerDev.id}`) || "{}"); } catch {}
-          } else {
-            // 純被分享者：以目前顯示中的 timerConfigs 為基底，避免其他類型設定被清掉
-            try { stored = JSON.parse(JSON.stringify(
-              selectedDeviceRef.current && matchedDevs.some(d => d.id === selectedDeviceRef.current?.id)
-                ? Object.fromEntries(Object.entries(
-                    JSON.parse(localStorage.getItem(`btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`) || "{}") as [string, TimerCfg][]
-                  ))
-                : {}
-            )); } catch {}
-          }
-
-          (parsed.periodics as any[]).forEach((p: any) => {
-            const a: string = p.target;
-            const intervalSec = Math.floor(Number(p.intervalSec));
-            if (p.active && Number.isFinite(intervalSec) && intervalSec > 1) {
-              stored[a] = {
-                mode: "periodic",
-                intervalSec,
-                periodicStartedAt: stored[a]?.mode === "periodic" ? stored[a].periodicStartedAt : Date.now(),
-                active: true,
-              };
-            } else {
-              if (stored[a]?.mode === "periodic") delete stored[a];
+            const k = `${d.mqtt_user}|${d.device_name}`;
+            if (!seenCfg.has(k)) {
+              seenCfg.add(k);
+              cfgReportTopics.push(`device/${d.mqtt_user}/${d.device_name}/cfg_report`);
             }
           });
 
-          if (ownerDev) {
-            try { localStorage.setItem(`btnTimers_${ownerDev.id}`, JSON.stringify(stored)); } catch {}
-          } else {
-            // 純被分享者：暫存到臨時 key（以 mqtt_user+device_name 識別）
-            try { localStorage.setItem(`btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`, JSON.stringify(stored)); } catch {}
-          }
+          const allTopics = [...statusTopics, ...cfgReportTopics];
+          if (allTopics.length) client.subscribe(allTopics, { qos: 0 });
 
-          // 目前選中的設備屬於同一實體設備（owner 或 share row）→ 更新顯示
-          if (matchedDevs.some(d => d.id === selectedDeviceRef.current?.id)) {
-            setTimerConfigs({ ...stored });
-          }
-          return;
-        }
+          setTimeout(() => {
+            if (!isActive || !client || !client.connected) return;
+            const seen = new Set<string>();
+            devs.filter(d => d.mqtt_user && d.device_name).forEach(d => {
+              const key = `${d.mqtt_user}|${d.device_name}`;
+              if (seen.has(key)) return;
+              seen.add(key);
+              const cfgTopic = `device/${d.mqtt_user}/${d.device_name}/config`;
+              client.publish(cfgTopic, JSON.stringify({ action: "get_periodic" }), { qos: 1 });
+              client.publish(cfgTopic, JSON.stringify({ action: "get_schedule" }), { qos: 1 });
+              client.publish(cfgTopic, JSON.stringify({ action: "get_range"    }), { qos: 1 });
+            });
+          }, 1500);
+        });
 
-        // ── ESP32 回報觸發區間設定（range_cfg）→ 同步 state + localStorage ──
-        const rangeItems =
-          parsed?.type === "range_cfg"
-            ? (Array.isArray(parsed.ranges)
-                ? parsed.ranges
-                : (parsed?.target ? [parsed] : null))
-            : null;
-        if (rangeItems) {
-          const matchedDevs = devs.filter(d =>
-            d.mqtt_user && d.device_name &&
-            topic.startsWith(`device/${d.mqtt_user}/${d.device_name}/`)
-          );
-          if (!matchedDevs.length) return;
+        client.on("message", (topic, payload) => {
+          if (!isActive) return;
+          const text = new TextDecoder().decode(payload).trim();
+          let parsed: any = null;
+          try { parsed = JSON.parse(text); } catch {}
 
-          const ownerDev = matchedDevs.find(d => !d.share_from);
-          let stored: Record<string, TimerCfg> = {};
-          if (ownerDev) {
-            try { stored = JSON.parse(localStorage.getItem(`btnTimers_${ownerDev.id}`) || "{}"); } catch {}
-          } else {
-            try { stored = JSON.parse(localStorage.getItem(`btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`) || "{}"); } catch {}
-          }
-
-          (rangeItems as any[]).forEach((r: any) => {
-            const a: string = r.target;
-            if (r.active) {
-              stored[a] = {
-                mode: "range", active: true,
-                rangeOpen:  { hour: r.openHour,  minute: r.openMin  },
-                rangeClose: { hour: r.closeHour, minute: r.closeMin },
-              };
-            } else {
-              if (stored[a]?.mode === "range") delete stored[a];
-            }
-          });
-
-          if (ownerDev) {
-            try { localStorage.setItem(`btnTimers_${ownerDev.id}`, JSON.stringify(stored)); } catch {}
-          } else {
-            try { localStorage.setItem(`btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`, JSON.stringify(stored)); } catch {}
-          }
-
-          if (matchedDevs.some(d => d.id === selectedDeviceRef.current?.id)) {
-            setTimerConfigs({ ...stored });
-          }
-          return;
-        }
-
-        // ── ESP32 回報排程設定（schedule_cfg）→ 同步 state + localStorage ──
-        if (parsed?.type === "schedule_cfg" && Array.isArray(parsed.schedules)) {
-          // 找到所有符合此 topic 的設備（owner row + share row 都要）
-          const matchedDevs = devs.filter(d =>
-            d.mqtt_user && d.device_name &&
-            topic.startsWith(`device/${d.mqtt_user}/${d.device_name}/`)
-          );
-          if (!matchedDevs.length) return;
-
-          const ownerDev = matchedDevs.find(d => !d.share_from);
-          let stored: Record<string, TimerCfg> = {};
-          if (ownerDev) {
-            try { stored = JSON.parse(localStorage.getItem(`btnTimers_${ownerDev.id}`) || "{}"); } catch {}
-          } else {
-            // 純被分享者：從臨時 key 讀取（含先前 periodic_cfg 合併的結果）
-            try { stored = JSON.parse(localStorage.getItem(`btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`) || "{}"); } catch {}
-          }
-
-          (parsed.schedules as any[]).forEach((s: any) => {
-            const a: string = s.target;
-            if (s.active) {
-              stored[a] = {
-                mode: "schedule", active: true,
-                schedule: {
-                  type:     s.stype === 1 || s.stype === "date" ? "date" : "weekday",
-                  weekMask: s.weekMask,
-                  dates:    typeof s.dates === "string" ? s.dates.split(",").filter(Boolean) : (s.dates ?? []),
-                  hour: s.hour, minute: s.minute,
-                },
-              };
-            } else {
-              if (stored[a]?.mode === "schedule") delete stored[a];
-            }
-          });
-
-          if (ownerDev) {
-            try { localStorage.setItem(`btnTimers_${ownerDev.id}`, JSON.stringify(stored)); } catch {}
-          } else {
-            // 純被分享者：同步更新臨時 key
-            try { localStorage.setItem(`btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`, JSON.stringify(stored)); } catch {}
-          }
-
-          // 目前選中的設備屬於同一實體設備（owner 或 share row）→ 更新顯示
-          if (matchedDevs.some(d => d.id === selectedDeviceRef.current?.id)) {
-            setTimerConfigs({ ...stored });
-          }
-          return;
-        }
-        // ── App 層同步完整設定（app_cfg）→ 分享設備直接顯示 owner 的 timerConfigs ──
-        if (parsed?.type === "app_cfg" && parsed.configs && typeof parsed.configs === "object") {
-          const matchedDevs = devs.filter(d =>
-            d.mqtt_user && d.device_name &&
-            topic.startsWith(`device/${d.mqtt_user}/${d.device_name}/`)
-          );
-          if (matchedDevs.length) {
+          // ── ESP32 回報循環設定（periodic_cfg）→ 同步 state + localStorage ──
+          if (parsed?.type === "periodic_cfg" && Array.isArray(parsed.periodics)) {
+            const matchedDevs = devs.filter(d =>
+              d.mqtt_user && d.device_name &&
+              topic.startsWith(`device/${d.mqtt_user}/${d.device_name}/`)
+            );
+            if (!matchedDevs.length) return;
             const ownerDev = matchedDevs.find(d => !d.share_from);
-            const configs = parsed.configs as Record<string, TimerCfg>;
+            let stored: Record<string, TimerCfg> = {};
             if (ownerDev) {
-              // owner 自己收到（自發自收）：更新 localStorage 確保一致
-              try { localStorage.setItem(`btnTimers_${ownerDev.id}`, JSON.stringify(configs)); } catch {}
+              try { stored = JSON.parse(localStorage.getItem(`btnTimers_${ownerDev.id}`) || "{}"); } catch {}
             } else {
-              // 純被分享者：更新臨時 key
-              try {
-                localStorage.setItem(
-                  `btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`,
-                  JSON.stringify(configs)
-                );
-              } catch {}
+              try { stored = JSON.parse(JSON.stringify(
+                selectedDeviceRef.current && matchedDevs.some(d => d.id === selectedDeviceRef.current?.id)
+                  ? Object.fromEntries(Object.entries(
+                      JSON.parse(localStorage.getItem(`btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`) || "{}") as [string, TimerCfg][]
+                    ))
+                  : {}
+              )); } catch {}
             }
-            // 目前選中的設備屬於同一實體設備 → 更新顯示
-            if (matchedDevs.some(d => d.id === selectedDeviceRef.current?.id)) {
-              setTimerConfigs({ ...configs });
+            (parsed.periodics as any[]).forEach((p: any) => {
+              const a: string = p.target;
+              const intervalSec = Math.floor(Number(p.intervalSec));
+              if (p.active && Number.isFinite(intervalSec) && intervalSec > 1) {
+                stored[a] = {
+                  mode: "periodic",
+                  intervalSec,
+                  periodicStartedAt: stored[a]?.mode === "periodic" ? stored[a].periodicStartedAt : Date.now(),
+                  active: true,
+                };
+              } else {
+                if (stored[a]?.mode === "periodic") delete stored[a];
+              }
+            });
+            if (ownerDev) {
+              try { localStorage.setItem(`btnTimers_${ownerDev.id}`, JSON.stringify(stored)); } catch {}
+            } else {
+              try { localStorage.setItem(`btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`, JSON.stringify(stored)); } catch {}
             }
+            if (matchedDevs.some(d => d.id === selectedDeviceRef.current?.id)) setTimerConfigs({ ...stored });
+            return;
           }
-          return;
-        }
 
-        const action = parsed?.action ?? text;
-        const online = String(action).toLowerCase() !== "offline"
-                    && String(action).toLowerCase() !== "disconnected";
-        devs.forEach((d) => {
-          if (!d.mqtt_user || !d.device_name) return;
-          if (topic === `device/${d.mqtt_user}/${d.device_name}/status`) {
-            setDeviceOnlineMap((prev) => ({ ...prev, [d.id]: online }));
+          // ── ESP32 回報觸發區間設定（range_cfg）──
+          const rangeItems =
+            parsed?.type === "range_cfg"
+              ? (Array.isArray(parsed.ranges) ? parsed.ranges : (parsed?.target ? [parsed] : null))
+              : null;
+          if (rangeItems) {
+            const matchedDevs = devs.filter(d =>
+              d.mqtt_user && d.device_name &&
+              topic.startsWith(`device/${d.mqtt_user}/${d.device_name}/`)
+            );
+            if (!matchedDevs.length) return;
+            const ownerDev = matchedDevs.find(d => !d.share_from);
+            let stored: Record<string, TimerCfg> = {};
+            if (ownerDev) {
+              try { stored = JSON.parse(localStorage.getItem(`btnTimers_${ownerDev.id}`) || "{}"); } catch {}
+            } else {
+              try { stored = JSON.parse(localStorage.getItem(`btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`) || "{}"); } catch {}
+            }
+            (rangeItems as any[]).forEach((r: any) => {
+              const a: string = r.target;
+              if (r.active) {
+                stored[a] = {
+                  mode: "range", active: true,
+                  rangeOpen:  { hour: r.openHour,  minute: r.openMin  },
+                  rangeClose: { hour: r.closeHour, minute: r.closeMin },
+                };
+              } else {
+                if (stored[a]?.mode === "range") delete stored[a];
+              }
+            });
+            if (ownerDev) {
+              try { localStorage.setItem(`btnTimers_${ownerDev.id}`, JSON.stringify(stored)); } catch {}
+            } else {
+              try { localStorage.setItem(`btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`, JSON.stringify(stored)); } catch {}
+            }
+            if (matchedDevs.some(d => d.id === selectedDeviceRef.current?.id)) setTimerConfigs({ ...stored });
+            return;
+          }
+
+          // ── ESP32 回報排程設定（schedule_cfg）──
+          if (parsed?.type === "schedule_cfg" && Array.isArray(parsed.schedules)) {
+            const matchedDevs = devs.filter(d =>
+              d.mqtt_user && d.device_name &&
+              topic.startsWith(`device/${d.mqtt_user}/${d.device_name}/`)
+            );
+            if (!matchedDevs.length) return;
+            const ownerDev = matchedDevs.find(d => !d.share_from);
+            let stored: Record<string, TimerCfg> = {};
+            if (ownerDev) {
+              try { stored = JSON.parse(localStorage.getItem(`btnTimers_${ownerDev.id}`) || "{}"); } catch {}
+            } else {
+              try { stored = JSON.parse(localStorage.getItem(`btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`) || "{}"); } catch {}
+            }
+            (parsed.schedules as any[]).forEach((s: any) => {
+              const a: string = s.target;
+              if (s.active) {
+                stored[a] = {
+                  mode: "schedule", active: true,
+                  schedule: {
+                    type:     s.stype === 1 || s.stype === "date" ? "date" : "weekday",
+                    weekMask: s.weekMask,
+                    dates:    typeof s.dates === "string" ? s.dates.split(",").filter(Boolean) : (s.dates ?? []),
+                    hour: s.hour, minute: s.minute,
+                  },
+                };
+              } else {
+                if (stored[a]?.mode === "schedule") delete stored[a];
+              }
+            });
+            if (ownerDev) {
+              try { localStorage.setItem(`btnTimers_${ownerDev.id}`, JSON.stringify(stored)); } catch {}
+            } else {
+              try { localStorage.setItem(`btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`, JSON.stringify(stored)); } catch {}
+            }
+            if (matchedDevs.some(d => d.id === selectedDeviceRef.current?.id)) setTimerConfigs({ ...stored });
+            return;
+          }
+
+          // ── App 層同步完整設定（app_cfg）──
+          if (parsed?.type === "app_cfg" && parsed.configs && typeof parsed.configs === "object") {
+            const matchedDevs = devs.filter(d =>
+              d.mqtt_user && d.device_name &&
+              topic.startsWith(`device/${d.mqtt_user}/${d.device_name}/`)
+            );
+            if (matchedDevs.length) {
+              const ownerDev = matchedDevs.find(d => !d.share_from);
+              const configs = parsed.configs as Record<string, TimerCfg>;
+              if (ownerDev) {
+                try { localStorage.setItem(`btnTimers_${ownerDev.id}`, JSON.stringify(configs)); } catch {}
+              } else {
+                try {
+                  localStorage.setItem(
+                    `btnTimers_tmp_${matchedDevs[0].mqtt_user}_${matchedDevs[0].device_name}`,
+                    JSON.stringify(configs)
+                  );
+                } catch {}
+              }
+              if (matchedDevs.some(d => d.id === selectedDeviceRef.current?.id)) setTimerConfigs({ ...configs });
+            }
+            return;
+          }
+
+          const action = parsed?.action ?? text;
+          const online = String(action).toLowerCase() !== "offline"
+                      && String(action).toLowerCase() !== "disconnected";
+          devs.forEach((d) => {
+            if (!d.mqtt_user || !d.device_name) return;
+            if (topic === `device/${d.mqtt_user}/${d.device_name}/status`) {
+              setDeviceOnlineMap((prev) => ({ ...prev, [d.id]: online }));
+            }
+          });
+        });
+
+        client.on("error", () => {
+          if (!isActive) return;
+          if (autoSwap) scheduleSwap("connect error");
+          // 非自動模式：維持 Connecting 讓 mqtt.js 重連機制處理
+        });
+
+        client.on("close", () => {
+          if (!isActive) return;
+          if (autoSwap) {
+            scheduleSwap("connection closed");
+          } else {
+            setServerStatusMap((prev) => ({ ...prev, [no]: "Offline" }));
           }
         });
-      });
 
-      client.on("error", () => {
-        if (!isActive) return;
-        // error 不代表伺服器離線（可能只是 auth 問題），維持 Connecting
-      });
+        client.on("reconnect", () => {
+          if (!isActive) return;
+          setServerStatusMap((prev) => ({ ...prev, [no]: "Connecting" }));
+        });
+      };
 
-      client.on("close", () => {
-        if (!isActive) return;
-        setServerStatusMap((prev) => ({ ...prev, [no]: "Offline" }));
-      });
-
-      client.on("reconnect", () => {
-        if (!isActive) return;
+      // 自動切換：關閉當前 client，idx++，2.5s 後用下一個候選重試
+      const scheduleSwap = (_reason: string) => {
+        if (!isActive || !autoSwap) return;
+        if (swapTimer) return; // 已在佇列中，防重複
         setServerStatusMap((prev) => ({ ...prev, [no]: "Connecting" }));
-      });
+        swapTimer = window.setTimeout(() => {
+          if (!isActive) return;
+          swapTimer = null;
+          candIdx = (candIdx + 1) % candidates.length;
+          connectOnce();
+        }, 2500);
+      };
+
+      connectOnce();
 
       cleanups.push(() => {
         isActive = false;
-        window.clearTimeout(initWatchdog);
+        clearAllTimers();
         delete mqttClientsRef.current[no];
-        try { client.end(true); } catch {}
+        if (client) { try { client.end(true); } catch {} client = null; }
       });
     });
 
